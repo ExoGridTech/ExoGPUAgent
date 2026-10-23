@@ -94,7 +94,21 @@ Description: Local-first NVIDIA GPU telemetry agent
 EOF
 
 mkdir -p "${OUT_DIR}"
-dpkg-deb --root-owner-group --build "${DEST}" "${OUT_DIR}/${DEB_NAME}"
+echo "Running: dpkg-deb --root-owner-group --build ${DEST} ${OUT_DIR}/${DEB_NAME}"
+if ! dpkg-deb --root-owner-group --build "${DEST}" "${OUT_DIR}/${DEB_NAME}"; then
+  echo "error: dpkg-deb failed to build ${DEB_NAME}" >&2
+  exit 1
+fi
+
+if [[ ! -f "${OUT_DIR}/${DEB_NAME}" ]]; then
+  echo "error: dpkg-deb reported success but ${OUT_DIR}/${DEB_NAME} is missing" >&2
+  ls -la "${OUT_DIR}" >&2 || true
+  exit 1
+fi
+if [[ ! -s "${OUT_DIR}/${DEB_NAME}" ]]; then
+  echo "error: built package is empty: ${OUT_DIR}/${DEB_NAME}" >&2
+  exit 1
+fi
 
 (
   cd "${OUT_DIR}"
@@ -105,6 +119,15 @@ dpkg-deb --root-owner-group --build "${DEST}" "${OUT_DIR}/${DEB_NAME}"
 echo "Built ${OUT_DIR}/${DEB_NAME}"
 dpkg-deb -I "${OUT_DIR}/${DEB_NAME}"
 dpkg-deb -c "${OUT_DIR}/${DEB_NAME}" | head -n 40
+
+# Machine-readable marker for CI assertions
+{
+  echo "deb_path=${OUT_DIR}/${DEB_NAME}"
+  echo "deb_name=${DEB_NAME}"
+  echo "version=${VERSION}"
+  sha256sum "${OUT_DIR}/${DEB_NAME}"
+} > "${OUT_DIR}/build-meta.txt"
+cat "${OUT_DIR}/build-meta.txt"
 
 # Record glibc baseline hint for docs/CI logs.
 if command -v ldd >/dev/null 2>&1; then

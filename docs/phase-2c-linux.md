@@ -6,8 +6,9 @@ Localhost-only Linux x64 packaging for ExoGPUAgent `0.3.0`.
 
 | Artifact | Description |
 |----------|-------------|
-| `exogpuagent` (portable `.tar.gz`) | Binary + unit + default config + validate script |
-| `exogpuagent_0.3.0_amd64.deb` | apt-installable package + systemd unit |
+| `exogpuagent-v0.3.0-linux-x64-<sha>` | Portable `.tar.gz` only (bin + unit + scripts) |
+| `exogpuagent-deb-v0.3.0-amd64-<sha>` | Dedicated DEB bundle for `apt install` (includes `build-meta.txt`) |
+| `exogpuagent_0.3.0_amd64.deb` | Package file inside the **deb** artifact only |
 
 GUI package is **not** included in 2C-B (see Phase 2C-C).
 

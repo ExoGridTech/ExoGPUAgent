@@ -282,41 +282,147 @@ jobs:
           cat "${OUT}/SHA256SUMS.txt"
 
       - name: Build Debian package
+        id: deb
         shell: bash
         run: |
           set -euo pipefail
+          VERSION="${{ steps.meta.outputs.version }}"
+          SHORT_SHA="${{ steps.meta.outputs.short_sha }}"
+          DEB_NAME="exogpuagent_${VERSION}_amd64.deb"
+          DEB_PATH="dist/deb/${DEB_NAME}"
+          STAGE="dist/exogpuagent-deb-v${VERSION}-amd64-${SHORT_SHA}"
+          META="dist/deb/build-meta.txt"
+
           chmod +x packaging/linux/build-deb.sh
-          VERSION="${{ steps.meta.outputs.version }}" \
+          VERSION="${VERSION}" \
             BIN="${PWD}/target/release/exogpuagent" \
             OUT_DIR="${PWD}/dist/deb" \
             ./packaging/linux/build-deb.sh
 
-          DEB="dist/deb/exogpuagent_${{ steps.meta.outputs.version }}_amd64.deb"
-          test -f "${DEB}"
-          # Stage versioned artifact directory for upload
-          STAGE="dist/exogpuagent_${{ steps.meta.outputs.version }}_amd64-${{ steps.meta.outputs.short_sha }}"
+          if [[ ! -f "${DEB_PATH}" ]]; then
+            echo "::error::Debian package was not produced at ${DEB_PATH}"
+            ls -la dist/deb || true
+            exit 1
+          fi
+          if [[ ! -s "${DEB_PATH}" ]]; then
+            echo "::error::Debian package at ${DEB_PATH} is empty"
+            exit 1
+          fi
+          if [[ ! -f "${META}" ]]; then
+            echo "::error::build-meta.txt missing after package build"
+            exit 1
+          fi
+          if ! command -v dpkg-deb >/dev/null 2>&1; then
+            echo "::error::dpkg-deb missing after package build"
+            exit 1
+          fi
+          dpkg-deb -I "${DEB_PATH}" >/tmp/ega-deb-info.txt
+          cat /tmp/ega-deb-info.txt
+          if ! grep -q "Package: exogpuagent" /tmp/ega-deb-info.txt; then
+            echo "::error::dpkg-deb -I did not report Package: exogpuagent"
+            exit 1
+          fi
+          # Integrity: readable control + non-empty data members
+          if ! dpkg-deb -c "${DEB_PATH}" | grep -q './usr/bin/exogpuagent'; then
+            echo "::error::.deb does not contain /usr/bin/exogpuagent"
+            exit 1
+          fi
+
           mkdir -p "${STAGE}"
-          cp "${DEB}" "${STAGE}/"
-          cp dist/deb/SHA256SUMS.txt "${STAGE}/"
+          cp "${DEB_PATH}" "${STAGE}/${DEB_NAME}"
+          cp "${META}" "${STAGE}/build-meta.txt"
           cp docs/phase-2c-linux.md "${STAGE}/"
           cp dist/meta/glibc-baseline.txt "${STAGE}/"
           (
             cd "${STAGE}"
-            # Refresh SHA256SUMS to include companion docs
-            sha256sum "exogpuagent_${{ steps.meta.outputs.version }}_amd64.deb" \
-              phase-2c-linux.md glibc-baseline.txt > SHA256SUMS.txt
+            sha256sum "${DEB_NAME}" build-meta.txt phase-2c-linux.md glibc-baseline.txt > SHA256SUMS.txt
             sha256sum -c SHA256SUMS.txt
+            test -f "${DEB_NAME}"
+            test -s "${DEB_NAME}"
           )
           ls -la "${STAGE}"
           cat "${STAGE}/SHA256SUMS.txt"
+          cat "${STAGE}/build-meta.txt"
+
+          echo "deb_name=${DEB_NAME}" >> "$GITHUB_OUTPUT"
+          echo "deb_stage=${STAGE}" >> "$GITHUB_OUTPUT"
+          echo "deb_path=${DEB_PATH}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Linux artifacts (separate downloads)"
+            echo
+            echo "| Artifact | Contents |"
+            echo "|----------|----------|"
+            echo "| \`${{ steps.meta.outputs.artifact }}\` | Portable \`.tar.gz\` only |"
+            echo "| \`exogpuagent-deb-v${VERSION}-amd64-${SHORT_SHA}\` | \`${DEB_NAME}\` + checksums + \`build-meta.txt\` |"
+            echo
+            echo "Download the **deb** artifact for \`apt install\`. The portable artifact does **not** include the \`.deb\`."
+            echo
+            echo '```'
+            cat "${META}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Smoke DEB lifecycle (disposable runner)
         shell: bash
         run: |
           set -euo pipefail
+          DEB_PATH="${{ steps.deb.outputs.deb_path }}"
+          if [[ -z "${DEB_PATH}" || ! -f "${DEB_PATH}" ]]; then
+            echo "::error::Smoke test cannot run: .deb missing (${DEB_PATH:-unset})"
+            exit 1
+          fi
           chmod +x scripts/linux/smoke-deb-lifecycle.sh
-          sudo ./scripts/linux/smoke-deb-lifecycle.sh \
-            "dist/deb/exogpuagent_${{ steps.meta.outputs.version }}_amd64.deb"
+          sudo ./scripts/linux/smoke-deb-lifecycle.sh "${DEB_PATH}"
+          # Ensure packaging outputs still exist after smoke (smoke must not delete them)
+          if [[ ! -f "${DEB_PATH}" ]]; then
+            echo "::error::.deb disappeared after smoke test: ${DEB_PATH}"
+            exit 1
+          fi
+          if [[ ! -f "${{ steps.deb.outputs.deb_stage }}/${{ steps.deb.outputs.deb_name }}" ]]; then
+            echo "::error::staged .deb missing after smoke test"
+            exit 1
+          fi
+
+      - name: Verify Debian artifact staged before upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="${{ steps.deb.outputs.deb_stage }}"
+          DEB_NAME="${{ steps.deb.outputs.deb_name }}"
+          PORTABLE_OUT="dist/${{ steps.meta.outputs.artifact }}"
+          echo "Checking dedicated DEB stage: ${STAGE}"
+          if [[ ! -d "${STAGE}" ]]; then
+            echo "::error::DEB stage directory missing: ${STAGE}"
+            exit 1
+          fi
+          if [[ ! -f "${STAGE}/${DEB_NAME}" || ! -s "${STAGE}/${DEB_NAME}" ]]; then
+            echo "::error::staged .deb missing or empty: ${STAGE}/${DEB_NAME}"
+            exit 1
+          fi
+          if [[ ! -f "${STAGE}/SHA256SUMS.txt" ]]; then
+            echo "::error::staged SHA256SUMS.txt missing"
+            exit 1
+          fi
+          if [[ ! -f "${STAGE}/build-meta.txt" ]]; then
+            echo "::error::staged build-meta.txt missing"
+            exit 1
+          fi
+          (
+            cd "${STAGE}"
+            sha256sum -c SHA256SUMS.txt
+          )
+          # Portable must remain separate (no .deb duplication).
+          if [[ -f "${PORTABLE_OUT}/${DEB_NAME}" ]]; then
+            echo "::error::portable artifact must not contain ${DEB_NAME} (artifacts must stay separate)"
+            exit 1
+          fi
+          if [[ ! -d "${PORTABLE_OUT}" ]]; then
+            echo "::error::portable staging dir missing: ${PORTABLE_OUT}"
+            exit 1
+          fi
+          ls -la "${STAGE}"
+          ls -la "${PORTABLE_OUT}"
 
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
@@ -329,7 +435,8 @@ jobs:
       - name: Upload Debian package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: exogpuagent_${{ steps.meta.outputs.version }}_amd64-${{ steps.meta.outputs.short_sha }}
-          path: dist/exogpuagent_${{ steps.meta.outputs.version }}_amd64-${{ steps.meta.outputs.short_sha }}/
+          # Explicit "deb" in the name so it is not confused with the portable tarball.
+          name: exogpuagent-deb-v${{ steps.meta.outputs.version }}-amd64-${{ steps.meta.outputs.short_sha }}
+          path: ${{ steps.deb.outputs.deb_stage }}/
           if-no-files-found: error
           retention-days: 14
