@@ -1,0 +1,25 @@
+{
+  "note": "Sanitized example only. Do not commit real Tailscale IPs, wallets, or live telemetry dumps.",
+  "captured_from": "http://127.0.0.1:21550/",
+  "tailscale_host": "<TAILSCALE_CGNAT_IP>",
+  "agent_12001_via_tailscale": "timeout (expected; do not expose)",
+  "srbminer": {
+    "miner_version": "3.8.0",
+    "rig_name": "example-rig",
+    "total_gpu_workers": 1,
+    "gpu_devices": [
+      {
+        "id": 1,
+        "topology_id": "0000:01:00.0",
+        "model": "nvidia_geforce_rtx_3090",
+        "fan_speed_percent": 80,
+        "temperature": 70,
+        "asic_power": 280,
+        "core_clock": 1500,
+        "memory_clock": 9500
+      }
+    ],
+    "algorithm": "example-algo",
+    "shares_accepted_sample": 0
+  }
+}
