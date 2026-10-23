@@ -80,7 +80,8 @@ fn run_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _ = shutdown_rx.recv();
     let _ = watch_tx.send(true);
 
-    let _ = rt.block_on(async {
+    // Wait briefly for graceful shutdown of the HTTP task.
+    rt.block_on(async {
         let _ = tokio::time::timeout(Duration::from_secs(10), server).await;
     });
 
