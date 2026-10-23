@@ -1,0 +1,5 @@
+exogpuagent (0.3.0) unstable; urgency=medium
+
+  * Phase 2C-B: systemd service, Debian package, localhost-only telemetry.
+
+ -- ExoGridTech <noreply@exogrid.tech>  Fri, 23 Oct 2026 12:00:00 -0600

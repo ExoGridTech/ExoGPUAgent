@@ -18,11 +18,15 @@ config.toml
 .env
 .env.*
 
+# Local build / package output
+dist/
+
 # Validation run artifacts (keep templates and *.example.*)
 docs/results/ck2-win-*.json
 docs/results/ck2-win-*.md
 !docs/results/ck2-win-RESULTS.template.md
 !docs/results/*.example.json
+exogpuagent-linux-validate-*.md
 
 # Editor / OS
 .idea/

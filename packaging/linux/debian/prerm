@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+
+# Debian maintainer script — prerm
+# $1 = remove | upgrade | deconfigure | failed-upgrade
+#
+# On upgrade: do NOT stop the service here. The new binary is unpacked next,
+# and postinst runs try-restart. Stopping on upgrade causes unnecessary downtime.
+
+case "$1" in
+remove|deconfigure)
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop exogpuagent.service >/dev/null 2>&1 || true
+    fi
+    ;;
+upgrade|failed-upgrade)
+    ;;
+esac
+
+exit 0

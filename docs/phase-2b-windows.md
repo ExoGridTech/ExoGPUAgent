@@ -1,13 +1,13 @@
 # Phase 2B — Windows service & installer
 
-Localhost-only Windows x64 packaging for ExoGPUAgent `0.2.0`.
+Localhost-only Windows x64 packaging for ExoGPUAgent (`0.3.0` crate; installer version follows `Cargo.toml` / Inno `#define`).
 
 ## What you get
 
 | Artifact | Description |
 |----------|-------------|
 | `exogpuagent.exe` (portable) | Console binary with CLI subcommands |
-| `ExoGPUAgent-Setup-v0.2.0-win64.exe` | Inno Setup installer + Windows service |
+| `ExoGPUAgent-Setup-v0.3.0-win64.exe` | Inno Setup installer + Windows service |
 
 ## Defaults
 
@@ -63,7 +63,7 @@ You will be asked whether to keep ProgramData config/logs. Service is always rem
 cargo build --release
 # Inno Setup 6 installed
 & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\windows\exogpuagent.iss
-# output: dist\windows-installer\ExoGPUAgent-Setup-v0.2.0-win64.exe
+# output: dist\windows-installer\ExoGPUAgent-Setup-v0.3.0-win64.exe
 ```
 
 ## Service diagnostics

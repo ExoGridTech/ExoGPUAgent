@@ -1,6 +1,7 @@
 //! ExoGPUAgent library: local NVIDIA GPU telemetry over HTTP.
 
 pub mod config;
+pub mod config_cmd;
 pub mod doctor;
 pub mod gpu;
 pub mod http;

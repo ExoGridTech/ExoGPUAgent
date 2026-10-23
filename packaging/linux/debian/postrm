@@ -1,0 +1,38 @@
+#!/bin/sh
+set -e
+
+# Debian maintainer script — postrm
+# $1 = remove | purge | upgrade | failed-upgrade | abort-install | abort-upgrade | disappear
+#
+# remove: disable unit leftovers; KEEP /etc/exogpuagent and /var/lib/exogpuagent
+# purge:  also delete only ExoGPUAgent config/state dirs (not other packages' data)
+# upgrade: no-op here (do not disable or delete config during upgrades)
+
+ETC_DIR=/etc/exogpuagent
+VAR_DIR=/var/lib/exogpuagent
+UNIT=exogpuagent.service
+
+cleanup_systemd() {
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable "$UNIT" >/dev/null 2>&1 || true
+        systemctl daemon-reload || true
+        systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
+    fi
+}
+
+case "$1" in
+remove)
+    cleanup_systemd
+    # Intentionally keep ETC_DIR, VAR_DIR, and the system user/group.
+    ;;
+purge)
+    cleanup_systemd
+    # Only ExoGPUAgent paths — never touch other services or home directories.
+    rm -rf "$ETC_DIR" "$VAR_DIR"
+    # Leave system user/group (may own leftover files; avoids surprising UID reuse).
+    ;;
+upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+    ;;
+esac
+
+exit 0

@@ -1,0 +1,38 @@
+[Unit]
+Description=ExoGPUAgent NVIDIA GPU telemetry (localhost)
+Documentation=https://github.com/ExoGridTech/ExoGPUAgent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=exogpuagent
+Group=exogpuagent
+ExecStart=/usr/bin/exogpuagent run --machine
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+# Least privilege: dedicated user, no added capabilities, no privilege escalation.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# PrivateDevices defaults to false — required for NVML (/dev/nvidia*). Do not set true.
+# Do NOT auto-add SupplementaryGroups=video/render here; operators may set host ACLs after lab validation.
+ReadWritePaths=/etc/exogpuagent /var/lib/exogpuagent
+
+# Localhost-only by config; this unit never opens firewall ports or installs drivers.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=exogpuagent
+
+[Install]
+WantedBy=multi-user.target

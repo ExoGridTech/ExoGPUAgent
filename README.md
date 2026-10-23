@@ -7,11 +7,12 @@ Privacy-first, local by default. No cloud dependencies or telemetry collection.
 
 - **Phase 1:** Rust core — `/health` + `/gpu` via NVML  
 - **Phase 1.1 / 1.2:** Hardware validation docs + GitHub Actions builds  
-- **Phase 2B:** Windows service (SCM) + Inno Setup installer (`0.2.0`) — localhost only  
+- **Phase 2B:** Windows service (SCM) + Inno Setup installer — localhost only  
+- **Phase 2C-B:** Linux systemd + Debian package (`0.3.0`) — localhost only; **no GUI yet**
 
 ## Requirements
 
-- Rust 1.75+ to build from source (end users: use CI artifacts / Setup.exe)
+- Rust 1.75+ to build from source (end users: use CI artifacts / Setup.exe / `.deb`)
 - NVIDIA driver with NVML for live telemetry
 - Tests run without NVIDIA hardware (mock collector)
 
@@ -34,7 +35,8 @@ autostart = true
 ```
 
 - Portable config: platform user config dir (`directories`)  
-- Service config (Windows): `%ProgramData%\ExoGridTech\ExoGPUAgent\config.toml`
+- Service config (Windows): `%ProgramData%\ExoGridTech\ExoGPUAgent\config.toml`  
+- Service config (Linux): `/etc/exogpuagent/config.toml`
 
 ## CLI
 
@@ -43,7 +45,8 @@ exogpuagent run [--config PATH] [--machine]
 exogpuagent status [--portable]
 exogpuagent doctor [--portable]
 exogpuagent version
-exogpuagent service install|uninstall|start|stop|restart   # Windows
+exogpuagent config path|show|set [--machine|--portable] [key=value ...]
+exogpuagent service install|uninstall|start|stop|restart
 ```
 
 ## API (JSON contract)
@@ -55,7 +58,15 @@ exogpuagent service install|uninstall|start|stop|restart   # Windows
 
 See [docs/phase-2b-windows.md](docs/phase-2b-windows.md).
 
-CI (manual): [docs/ci-build.md](docs/ci-build.md) — portable zip + `ExoGPUAgent-Setup-v0.2.0-win64.exe`.
+## Linux package (Phase 2C-B)
+
+See [docs/phase-2c-linux.md](docs/phase-2c-linux.md).
+
+```bash
+sudo apt install ./exogpuagent_0.3.0_amd64.deb
+```
+
+CI (manual): [docs/ci-build.md](docs/ci-build.md) — Windows Setup/portable + Linux `.tar.gz` + `.deb`.
 
 Keep `bind = "127.0.0.1"`. Do not expose port `12001` on Tailscale.
 

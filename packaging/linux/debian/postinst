@@ -1,0 +1,83 @@
+#!/bin/sh
+set -e
+
+# Debian maintainer script — postinst
+# $1 = configure | abort-upgrade | abort-remove | abort-deconfigure
+
+USER_NAME=exogpuagent
+GROUP_NAME=exogpuagent
+ETC_DIR=/etc/exogpuagent
+VAR_DIR=/var/lib/exogpuagent
+DEFAULT_CFG=/usr/share/exogpuagent/config.toml.default
+CFG="$ETC_DIR/config.toml"
+UNIT=exogpuagent.service
+
+warn() {
+    echo "exogpuagent: warning: $*" >&2
+}
+
+case "$1" in
+configure)
+    # --- identity (fail hard; leave package half-configured with a clear error) ---
+    if ! getent group "$GROUP_NAME" >/dev/null; then
+        groupadd --system "$GROUP_NAME" || {
+            echo "exogpuagent: error: failed to create system group '$GROUP_NAME'" >&2
+            exit 1
+        }
+    fi
+    if ! getent passwd "$USER_NAME" >/dev/null; then
+        useradd --system --gid "$GROUP_NAME" --home-dir "$VAR_DIR" \
+            --shell /usr/sbin/nologin --no-create-home "$USER_NAME" || {
+            echo "exogpuagent: error: failed to create system user '$USER_NAME'" >&2
+            exit 1
+        }
+    fi
+
+    # --- directories & first-boot config (never overwrite existing config.toml) ---
+    mkdir -p "$ETC_DIR" "$VAR_DIR"
+    if [ ! -f "$CFG" ]; then
+        if [ ! -f "$DEFAULT_CFG" ]; then
+            echo "exogpuagent: error: missing default config at $DEFAULT_CFG" >&2
+            exit 1
+        fi
+        cp "$DEFAULT_CFG" "$CFG"
+    fi
+
+    chown root:"$GROUP_NAME" "$ETC_DIR"
+    chmod 0750 "$ETC_DIR"
+    chown root:"$GROUP_NAME" "$CFG"
+    chmod 0640 "$CFG"
+    chown "$USER_NAME":"$GROUP_NAME" "$VAR_DIR"
+    chmod 0750 "$VAR_DIR"
+
+    # Do NOT add exogpuagent to video/render/sudo or any privileged groups here.
+    # NVML device access is host-specific; operators may adjust udev/ACLs in lab.
+
+    # --- systemd (warn on soft failures; do not roll back the package) ---
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload || warn "systemctl daemon-reload failed"
+        if ! systemctl enable "$UNIT"; then
+            warn "failed to enable $UNIT (install continued)"
+        fi
+        if systemctl is-active --quiet "$UNIT" 2>/dev/null; then
+            # Upgrade path: restart only if already running.
+            if ! systemctl try-restart "$UNIT"; then
+                warn "try-restart $UNIT failed — check: journalctl -u $UNIT"
+            fi
+        else
+            if ! systemctl start "$UNIT"; then
+                warn "start $UNIT failed — package is installed; diagnose with:"
+                warn "  journalctl -u $UNIT -e"
+                warn "  exogpuagent doctor --machine"
+                warn "Common causes: port 12001 busy, missing NVIDIA driver (service may still run with /gpu 503)."
+            fi
+        fi
+    else
+        warn "systemctl not found; skip enable/start (manual service setup required)"
+    fi
+    ;;
+abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+esac
+
+exit 0

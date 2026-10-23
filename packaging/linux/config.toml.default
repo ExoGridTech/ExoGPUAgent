@@ -1,0 +1,9 @@
+# ExoGPUAgent machine configuration (localhost only).
+# Copied to /etc/exogpuagent/config.toml on first install if absent.
+# Upgrades must not overwrite an existing config.toml.
+
+host_name = ""
+bind = "127.0.0.1"
+port = 12001
+access_mode = "localhost"
+autostart = true

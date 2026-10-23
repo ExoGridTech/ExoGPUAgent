@@ -2,7 +2,7 @@
 ; Phase 2B — localhost only, native SCM service, no NVIDIA/Tailscale installers.
 
 #define MyAppName "ExoGPUAgent"
-#define MyAppVersion "0.2.0"
+#define MyAppVersion "0.3.0"
 #define MyAppPublisher "ExoGridTech"
 #define MyAppURL "https://github.com/ExoGridTech/ExoGPUAgent"
 #define MyAppExeName "exogpuagent.exe"

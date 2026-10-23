@@ -17,6 +17,7 @@ pub struct DoctorReport {
     pub config_summary: String,
     pub net_policy: String,
     pub port_free_for_bind: Option<bool>,
+    pub service: String,
     pub nvml: String,
     pub gpu_count: Option<usize>,
     pub health_http: String,
@@ -25,6 +26,8 @@ pub struct DoctorReport {
 
 pub fn run_doctor(config_path: &Path) -> DoctorReport {
     let mut notes = Vec::new();
+    // Hard failures only: invalid config / net policy. NVML absence is a soft note
+    // (daemon may still run and serve 503 on /gpu).
     let mut ok = true;
 
     let config = if config_path.exists() {
@@ -64,6 +67,8 @@ pub fn run_doctor(config_path: &Path) -> DoctorReport {
         Err(_) => Some(false),
     };
 
+    let service = crate::service::service_state_string();
+
     let (nvml, gpu_count) = match NvmlCollector::init() {
         Ok(c) => match c.gpu_count() {
             Ok(n) => ("ok".into(), Some(n)),
@@ -98,7 +103,15 @@ pub fn run_doctor(config_path: &Path) -> DoctorReport {
         }
     };
 
-    notes.push("Phase 2B binds localhost only; no firewall rules or remote access.".into());
+    if port_free == Some(false) && health_http.starts_with("port busy") {
+        notes.push(format!(
+            "port {bind}:{port} is in use but did not answer /health — resolve the conflict or change port in config.toml"
+        ));
+    }
+
+    notes.push(
+        "Phase 2C binds localhost only; no firewall rules, Tailscale, or remote access.".into(),
+    );
     notes.push("No cloud telemetry; no AtlasGPU dependency.".into());
 
     DoctorReport {
@@ -107,6 +120,7 @@ pub fn run_doctor(config_path: &Path) -> DoctorReport {
         config_summary,
         net_policy: net_policy_msg,
         port_free_for_bind: port_free,
+        service,
         nvml,
         gpu_count,
         health_http,

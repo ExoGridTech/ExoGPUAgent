@@ -1,4 +1,4 @@
-//! ExoGPUAgent — local-first NVIDIA GPU telemetry agent (Phase 2B Windows).
+//! ExoGPUAgent — local-first NVIDIA GPU telemetry agent (Phase 2C Linux + 2B Windows).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use exogpuagent::config::Config;
+use exogpuagent::config_cmd;
 use exogpuagent::doctor;
 use exogpuagent::server;
 use exogpuagent::service;
@@ -31,7 +32,7 @@ enum Commands {
         #[arg(long)]
         config: Option<PathBuf>,
 
-        /// Use machine-wide ProgramData config (same as the Windows service).
+        /// Use machine-wide config (ProgramData /etc — same as the service).
         #[arg(long)]
         machine: bool,
     },
@@ -40,7 +41,7 @@ enum Commands {
     Status {
         #[arg(long)]
         config: Option<PathBuf>,
-        /// Force per-user portable config instead of ProgramData.
+        /// Force per-user portable config instead of machine path.
         #[arg(long)]
         portable: bool,
     },
@@ -49,7 +50,7 @@ enum Commands {
     Doctor {
         #[arg(long)]
         config: Option<PathBuf>,
-        /// Force per-user portable config instead of ProgramData.
+        /// Force per-user portable config instead of machine path.
         #[arg(long)]
         portable: bool,
     },
@@ -57,7 +58,13 @@ enum Commands {
     /// Print version information.
     Version,
 
-    /// Windows service management (requires elevation for install/uninstall).
+    /// Show or modify configuration (never prints secrets).
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+
+    /// OS service management (Windows SCM / Linux systemd; elevation often required).
     Service {
         #[command(subcommand)]
         action: ServiceAction,
@@ -65,14 +72,48 @@ enum Commands {
 }
 
 #[derive(Debug, Subcommand)]
+enum ConfigAction {
+    /// Print the resolved config path.
+    Path {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        machine: bool,
+        #[arg(long)]
+        portable: bool,
+    },
+    /// Print config.toml contents (auth_token omitted).
+    Show {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        machine: bool,
+        #[arg(long)]
+        portable: bool,
+    },
+    /// Set one or more key=value fields and save.
+    Set {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        machine: bool,
+        #[arg(long)]
+        portable: bool,
+        /// Assignments such as port=12001 host_name=lab
+        #[arg(required = true)]
+        assignments: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum ServiceAction {
-    /// Register the Windows service (LocalService, auto-start).
+    /// Register / enable the OS service (Windows SCM or Linux systemd unit).
     Install {
-        /// Path to exogpuagent.exe (default: this executable).
+        /// Path to the exogpuagent binary (default: this executable). Windows only uses this.
         #[arg(long)]
         exe: Option<PathBuf>,
     },
-    /// Stop and remove the Windows service.
+    /// Stop and remove / disable the OS service (DEB-managed units must use apt).
     Uninstall,
     Start,
     Stop,
@@ -86,7 +127,7 @@ fn main() -> ExitCode {
     }
 
     match run_cli() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(err) => {
             eprintln!("exogpuagent: {err}");
             ExitCode::FAILURE
@@ -94,7 +135,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
+fn run_cli() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Commands::Run {
         config: None,
@@ -106,19 +147,22 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 .enable_all()
                 .build()?;
             rt.block_on(server::run_foreground(&path))?;
+            Ok(ExitCode::SUCCESS)
         }
         Commands::Status { config, portable } => {
             let path = Config::resolve_admin_path(config, portable)?;
             let report = status::run_status(&path);
             println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(ExitCode::SUCCESS)
         }
         Commands::Doctor { config, portable } => {
             let path = Config::resolve_admin_path(config, portable)?;
             let report = doctor::run_doctor(&path);
             println!("{}", serde_json::to_string_pretty(&report)?);
             if !report.ok {
-                return Err("doctor reported problems (see JSON above)".into());
+                return Ok(ExitCode::from(1));
             }
+            Ok(ExitCode::SUCCESS)
         }
         Commands::Version => {
             println!(
@@ -126,7 +170,45 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 env!("CARGO_PKG_VERSION"),
                 std::env::consts::OS
             );
+            Ok(ExitCode::SUCCESS)
         }
+        Commands::Config { action } => match action {
+            ConfigAction::Path {
+                config,
+                machine,
+                portable,
+            } => {
+                let path = config_cmd::path(config, machine, portable)?;
+                println!("{}", path.display());
+                Ok(ExitCode::SUCCESS)
+            }
+            ConfigAction::Show {
+                config,
+                machine,
+                portable,
+            } => {
+                let path = resolve_config_write_path(config, machine, portable)?;
+                print!("{}", config_cmd::show(&path)?);
+                Ok(ExitCode::SUCCESS)
+            }
+            ConfigAction::Set {
+                config,
+                machine,
+                portable,
+                assignments,
+            } => {
+                let path = resolve_config_write_path(config, machine, portable)?;
+                let result = config_cmd::set(&path, &assignments)?;
+                println!("wrote {}", result.path.display());
+                println!("summary: {}", result.summary);
+                if result.restart_required {
+                    println!("note: service restart required for bind/port/access_mode changes");
+                    println!("  Windows: exogpuagent service restart");
+                    println!("  Linux:   sudo systemctl restart exogpuagent");
+                }
+                Ok(ExitCode::SUCCESS)
+            }
+        },
         Commands::Service { action } => match action {
             ServiceAction::Install { exe } => {
                 let exe = match exe {
@@ -134,34 +216,49 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                     None => std::env::current_exe()?,
                 };
                 service::install(&exe)?;
-                println!("service {0} installed (LocalService, auto-start)", {
-                    #[cfg(windows)]
-                    {
-                        service::SERVICE_NAME
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        "ExoGPUAgent"
-                    }
-                });
+                println!(
+                    "service {} installed/enabled (auto-start when supported)",
+                    service::SERVICE_NAME
+                );
+                Ok(ExitCode::SUCCESS)
             }
             ServiceAction::Uninstall => {
                 service::uninstall()?;
-                println!("service uninstalled");
+                println!("service {} uninstalled/disabled", service::SERVICE_NAME);
+                Ok(ExitCode::SUCCESS)
             }
             ServiceAction::Start => {
                 service::start()?;
                 println!("service start requested");
+                Ok(ExitCode::SUCCESS)
             }
             ServiceAction::Stop => {
                 service::stop()?;
                 println!("service stop requested");
+                Ok(ExitCode::SUCCESS)
             }
             ServiceAction::Restart => {
                 service::restart()?;
                 println!("service restart requested");
+                Ok(ExitCode::SUCCESS)
             }
         },
     }
-    Ok(())
+}
+
+fn resolve_config_write_path(
+    explicit: Option<PathBuf>,
+    prefer_machine: bool,
+    force_portable: bool,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    if prefer_machine {
+        return Ok(Config::machine_path());
+    }
+    if force_portable {
+        return Ok(Config::portable_path()?);
+    }
+    Ok(Config::resolve_admin_path(None, false)?)
 }
