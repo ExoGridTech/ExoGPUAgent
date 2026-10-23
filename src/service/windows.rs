@@ -9,12 +9,15 @@ use windows_service::service::{
     ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
     ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
 };
-use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+use windows_service::service_control_handler::{
+    self, ServiceControlHandlerResult, ServiceStatusHandle,
+};
 use windows_service::service_dispatcher;
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 use crate::config::Config;
-use crate::server;
+use crate::server::AgentWorker;
+use crate::service_log;
 
 pub const SERVICE_NAME: &str = "ExoGPUAgent";
 const SERVICE_DISPLAY: &str = "ExoGPUAgent NVIDIA Telemetry";
@@ -31,17 +34,37 @@ pub fn maybe_dispatch_as_service() -> bool {
 windows_service::define_windows_service!(ffi_service_main, service_main);
 
 fn service_main(_args: Vec<OsString>) {
+    // Capture panics into the persistent service log (SCM has no console).
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        service_log::write(&format!("panic: {info}"));
+        prev(info);
+    }));
+
+    service_log::write(&format!(
+        "service_main enter; log={}",
+        service_log::path_display()
+    ));
+
     if let Err(e) = run_service() {
-        eprintln!("exogpuagent service error: {e}");
+        service_log::write(&format!("service_main fatal: {e}"));
+    } else {
+        service_log::write("service_main exit ok");
     }
 }
 
 fn run_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
 
     let event_handler = move |control| -> ServiceControlHandlerResult {
         match control {
-            ServiceControl::Stop | ServiceControl::Shutdown => {
+            ServiceControl::Stop => {
+                service_log::write("SCM control: Stop");
+                let _ = shutdown_tx.send(());
+                ServiceControlHandlerResult::NoError
+            }
+            ServiceControl::Shutdown => {
+                service_log::write("SCM control: Shutdown");
                 let _ = shutdown_tx.send(());
                 ServiceControlHandlerResult::NoError
             }
@@ -52,50 +75,120 @@ fn run_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
 
-    status_handle.set_service_status(ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    })?;
+    // Do not report Running until the HTTP listener is bound.
+    set_status(
+        &status_handle,
+        ServiceState::StartPending,
+        ServiceControlAccept::empty(),
+        ServiceExitCode::Win32(0),
+        1,
+        Duration::from_secs(30),
+    )?;
+    service_log::write("SCM state -> StartPending");
 
     let config_path = Config::machine_path();
-    let _ = Config::save_if_absent(&config_path);
+    match Config::save_if_absent(&config_path) {
+        Ok(cfg) => service_log::write(&format!(
+            "config {} ({})",
+            config_path.display(),
+            cfg.safe_summary()
+        )),
+        Err(e) => {
+            service_log::write(&format!("config error: {e}"));
+            set_status(
+                &status_handle,
+                ServiceState::Stopped,
+                ServiceControlAccept::empty(),
+                ServiceExitCode::ServiceSpecific(1),
+                0,
+                Duration::default(),
+            )?;
+            return Err(e.into());
+        }
+    }
     let _ = std::fs::create_dir_all(Config::machine_logs_dir());
 
-    let (watch_tx, watch_rx) = tokio::sync::watch::channel(false);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-
-    let server = rt.spawn(async move {
-        if let Err(e) = server::run_with_shutdown(&config_path, watch_rx).await {
-            eprintln!("exogpuagent: server stopped: {e}");
+    // Critical: drive Tokio on a dedicated OS thread via block_on.
+    // Never spawn on current_thread and then block this thread on mpsc::recv —
+    // that starves the runtime (service stays Running with no TCP listener).
+    let worker = match AgentWorker::start(config_path.clone(), Duration::from_secs(30)) {
+        Ok((worker, addr)) => {
+            service_log::write(&format!("HTTP listening on http://{addr}"));
+            worker
         }
-    });
+        Err(e) => {
+            service_log::write(&format!("HTTP startup failed: {e}"));
+            set_status(
+                &status_handle,
+                ServiceState::Stopped,
+                ServiceControlAccept::empty(),
+                ServiceExitCode::ServiceSpecific(2),
+                0,
+                Duration::default(),
+            )?;
+            return Err(e.into());
+        }
+    };
 
+    set_status(
+        &status_handle,
+        ServiceState::Running,
+        ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        ServiceExitCode::Win32(0),
+        0,
+        Duration::default(),
+    )?;
+    service_log::write("SCM state -> Running (listener confirmed)");
+
+    // Block until SCM stop/shutdown.
     let _ = shutdown_rx.recv();
-    let _ = watch_tx.send(true);
+    service_log::write("stop requested; shutting down HTTP worker");
 
-    // Wait briefly for graceful shutdown of the HTTP task.
-    rt.block_on(async {
-        let _ = tokio::time::timeout(Duration::from_secs(10), server).await;
-    });
+    set_status(
+        &status_handle,
+        ServiceState::StopPending,
+        ServiceControlAccept::empty(),
+        ServiceExitCode::Win32(0),
+        1,
+        Duration::from_secs(15),
+    )?;
 
-    status_handle.set_service_status(ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Stopped,
-        controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    })?;
+    if let Err(e) = worker.stop() {
+        service_log::write(&format!("HTTP worker stop: {e}"));
+    } else {
+        service_log::write("HTTP worker stopped cleanly");
+    }
+
+    set_status(
+        &status_handle,
+        ServiceState::Stopped,
+        ServiceControlAccept::empty(),
+        ServiceExitCode::Win32(0),
+        0,
+        Duration::default(),
+    )?;
+    service_log::write("SCM state -> Stopped");
 
     Ok(())
+}
+
+fn set_status(
+    handle: &ServiceStatusHandle,
+    state: ServiceState,
+    controls: ServiceControlAccept,
+    exit_code: ServiceExitCode,
+    checkpoint: u32,
+    wait_hint: Duration,
+) -> windows_service::Result<()> {
+    handle.set_service_status(ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: state,
+        controls_accepted: controls,
+        exit_code,
+        checkpoint,
+        wait_hint,
+        process_id: None,
+    })
 }
 
 fn service_info_for(exe: &Path) -> ServiceInfo {

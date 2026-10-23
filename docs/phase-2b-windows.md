@@ -66,6 +66,14 @@ cargo build --release
 # output: dist\windows-installer\ExoGPUAgent-Setup-v0.2.0-win64.exe
 ```
 
+## Service diagnostics
+
+Persistent log (LocalService-writable under ProgramData):
+
+`%ProgramData%\ExoGridTech\ExoGPUAgent\logs\service.log`
+
+The service reports SCM `Running` only after the HTTP listener is bound. If `/health` fails, read this log before changing the service account.
+
 ## Limitations / risks
 
 - Unsigned installer may trigger SmartScreen.

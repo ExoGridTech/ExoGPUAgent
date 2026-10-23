@@ -10,6 +10,7 @@ pub mod net_policy;
 pub mod pci;
 pub mod server;
 pub mod service;
+pub mod service_log;
 pub mod status;
 
 pub use config::{AccessMode, Config};
