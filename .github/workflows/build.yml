@@ -198,7 +198,8 @@ jobs:
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
           echo "Packaging as ${ARTIFACT}"
-          ldd --version | head -n1
+          ldd --version > /tmp/ega-ldd-version.txt 2>&1 || true
+          head -n 1 /tmp/ega-ldd-version.txt || true
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -224,7 +225,8 @@ jobs:
           mkdir -p dist/meta
           {
             echo "runner=ubuntu-22.04"
-            ldd --version | head -n1
+            ldd --version > /tmp/ega-ldd-version.txt 2>&1 || true
+            head -n 1 /tmp/ega-ldd-version.txt || true
             echo "symbols:"
             objdump -T "$BIN" | grep -oE 'GLIBC_[0-9.]+' | sort -u
           } > dist/meta/glibc-baseline.txt
@@ -322,9 +324,16 @@ jobs:
             echo "::error::dpkg-deb -I did not report Package: exogpuagent"
             exit 1
           fi
-          # Integrity: readable control + non-empty data members
-          if ! dpkg-deb -c "${DEB_PATH}" | grep -q './usr/bin/exogpuagent'; then
+          # Integrity: list contents to a file first. Do NOT pipe dpkg-deb into
+          # `grep -q` under pipefail — grep exits early and tar gets SIGPIPE
+          # (false "missing binary" failure).
+          if ! dpkg-deb -c "${DEB_PATH}" >/tmp/ega-deb-contents.txt; then
+            echo "::error::dpkg-deb -c failed for ${DEB_PATH}"
+            exit 1
+          fi
+          if ! grep -F './usr/bin/exogpuagent' /tmp/ega-deb-contents.txt >/dev/null; then
             echo "::error::.deb does not contain /usr/bin/exogpuagent"
+            head -n 50 /tmp/ega-deb-contents.txt || true
             exit 1
           fi
 

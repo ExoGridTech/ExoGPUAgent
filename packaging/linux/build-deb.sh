@@ -118,7 +118,13 @@ fi
 
 echo "Built ${OUT_DIR}/${DEB_NAME}"
 dpkg-deb -I "${OUT_DIR}/${DEB_NAME}"
-dpkg-deb -c "${OUT_DIR}/${DEB_NAME}" | head -n 40
+# Avoid `dpkg-deb -c | head` under pipefail (SIGPIPE / false failures).
+dpkg-deb -c "${OUT_DIR}/${DEB_NAME}" > "${OUT_DIR}/contents.txt"
+head -n 40 "${OUT_DIR}/contents.txt"
+if ! grep -F './usr/bin/exogpuagent' "${OUT_DIR}/contents.txt" >/dev/null; then
+  echo "error: built package is missing ./usr/bin/exogpuagent" >&2
+  exit 1
+fi
 
 # Machine-readable marker for CI assertions
 {
@@ -132,7 +138,9 @@ cat "${OUT_DIR}/build-meta.txt"
 # Record glibc baseline hint for docs/CI logs.
 if command -v ldd >/dev/null 2>&1; then
   echo "--- ldd (host) ---"
-  ldd --version | head -n1 || true
+  # Avoid `ldd --version | head` broken-pipe noise under pipefail.
+  ldd --version > "${OUT_DIR}/ldd-version.txt" 2>&1 || true
+  head -n 1 "${OUT_DIR}/ldd-version.txt" || true
   ldd "${BIN}" || true
 fi
 if command -v objdump >/dev/null 2>&1; then
