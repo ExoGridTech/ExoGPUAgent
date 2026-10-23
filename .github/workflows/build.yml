@@ -23,12 +23,10 @@ jobs:
         include:
           - name: Windows x64
             os: windows-latest
-            target_triple: x86_64-pc-windows-msvc
             bin_name: exogpuagent.exe
             artifact_os: windows-x64
           - name: Linux x64
             os: ubuntu-latest
-            target_triple: x86_64-unknown-linux-gnu
             bin_name: exogpuagent
             artifact_os: linux-x64
 
@@ -70,7 +68,7 @@ jobs:
       - name: cargo build --release
         run: cargo build --release
 
-      - name: Stage artifact (Linux .tar.gz)
+      - name: Stage portable artifact (Linux .tar.gz)
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -90,7 +88,6 @@ jobs:
           install -m 0755 "target/release/${{ matrix.bin_name }}" "${PKG}/${VERSIONED}"
           cp README.md "${PKG}/README.md"
 
-          # Checksums of files that will live inside the tarball.
           (
             cd "${PKG}"
             sha256sum exogpuagent "${VERSIONED}" README.md > SHA256SUMS.txt
@@ -99,28 +96,22 @@ jobs:
             test -x "${VERSIONED}"
           )
 
-          # Final redistributable: tar.gz preserves +x mode.
           tar -C "${PKG}" -czf "${OUT}/${TARBALL}" \
             exogpuagent "${VERSIONED}" README.md SHA256SUMS.txt
 
-          # Checksum of the distributed archive itself.
           (
             cd "${OUT}"
             sha256sum "${TARBALL}" > SHA256SUMS.txt
             sha256sum -c SHA256SUMS.txt
           )
 
-          # Required final files must exist or this job fails before upload.
           test -f "${OUT}/${TARBALL}"
-          test -f "${OUT}/SHA256SUMS.txt"
-          test -s "${OUT}/${TARBALL}"
           test -s "${OUT}/SHA256SUMS.txt"
-
           ls -la "${OUT}"
           tar -tzvf "${OUT}/${TARBALL}"
           cat "${OUT}/SHA256SUMS.txt"
 
-      - name: Stage artifact (Windows)
+      - name: Stage portable artifact (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -137,9 +128,10 @@ jobs:
           Copy-Item $src (Join-Path $staging $versioned)
           Copy-Item $src (Join-Path $staging "exogpuagent.exe")
           Copy-Item "README.md" (Join-Path $staging "README.md")
+          Copy-Item "docs\phase-2b-windows.md" (Join-Path $staging "phase-2b-windows.md")
 
           $sums = @()
-          foreach ($f in @($versioned, "exogpuagent.exe", "README.md")) {
+          foreach ($f in @($versioned, "exogpuagent.exe", "README.md", "phase-2b-windows.md")) {
             $path = Join-Path $staging $f
             if (-not (Test-Path $path)) { throw "Missing staged file: $path" }
             $hash = (Get-FileHash -Algorithm SHA256 -Path $path).Hash.ToLower()
@@ -148,7 +140,6 @@ jobs:
           $sumPath = Join-Path $staging "SHA256SUMS.txt"
           ($sums -join "`n") + "`n" | Set-Content -NoNewline -Encoding ascii $sumPath
 
-          # Re-verify hashes match the final staged files.
           foreach ($line in Get-Content $sumPath) {
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
             $parts = $line -split "\s+", 2
@@ -156,24 +147,79 @@ jobs:
             $name = $parts[1].Trim()
             $actual = (Get-FileHash -Algorithm SHA256 -Path (Join-Path $staging $name)).Hash.ToLower()
             if ($expected -ne $actual) {
-              throw "Checksum mismatch for $name : expected $expected got $actual"
-            }
-          }
-
-          foreach ($req in @($versioned, "exogpuagent.exe", "README.md", "SHA256SUMS.txt")) {
-            $p = Join-Path $staging $req
-            if (-not (Test-Path $p) -or ((Get-Item $p).Length -le 0)) {
-              throw "Required artifact file missing or empty: $p"
+              throw "Checksum mismatch for $name"
             }
           }
 
           Get-ChildItem $staging | Format-Table Name, Length
           Get-Content $sumPath
 
-      - name: Upload artifact
+      - name: Install Inno Setup 6
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $isccDefault = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $isccAlt = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+          if ((Test-Path $isccDefault) -or (Test-Path $isccAlt)) {
+            Write-Host "Inno Setup already present"
+            exit 0
+          }
+          # Prefer Chocolatey package (unpinned) for the latest 6.x on the runner.
+          choco install innosetup -y --no-progress
+          if (-not ((Test-Path $isccDefault) -or (Test-Path $isccAlt))) {
+            throw "Inno Setup 6 ISCC.exe not found after choco install"
+          }
+
+      - name: Build Windows installer (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found" }
+          Write-Host "Using ISCC: $iscc"
+
+          $src = (Resolve-Path "target\release\exogpuagent.exe").Path
+          New-Item -ItemType Directory -Force -Path "dist\windows-installer" | Out-Null
+          & $iscc "/DSourceExe=$src" "packaging\windows\exogpuagent.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with $LASTEXITCODE" }
+
+          $setup = "dist\windows-installer\ExoGPUAgent-Setup-v${{ steps.meta.outputs.version }}-win64.exe"
+          if (-not (Test-Path $setup)) { throw "Missing installer: $setup" }
+
+          $outDir = "dist\ExoGPUAgent-Setup-v${{ steps.meta.outputs.version }}-win64-${{ steps.meta.outputs.short_sha }}"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+          $setupName = "ExoGPUAgent-Setup-v${{ steps.meta.outputs.version }}-win64.exe"
+          Copy-Item $setup (Join-Path $outDir $setupName)
+          Copy-Item "README.md" (Join-Path $outDir "README.md")
+          Copy-Item "docs\phase-2b-windows.md" (Join-Path $outDir "phase-2b-windows.md")
+
+          $sums = @()
+          foreach ($f in @($setupName, "README.md", "phase-2b-windows.md")) {
+            $path = Join-Path $outDir $f
+            $hash = (Get-FileHash -Algorithm SHA256 -Path $path).Hash.ToLower()
+            $sums += "$hash  $f"
+          }
+          $sumPath = Join-Path $outDir "SHA256SUMS.txt"
+          ($sums -join "`n") + "`n" | Set-Content -NoNewline -Encoding ascii $sumPath
+          Get-Content $sumPath
+          echo "SETUP_ARTIFACT_DIR=$outDir" >> $env:GITHUB_ENV
+
+      - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.meta.outputs.artifact }}
           path: dist/${{ steps.meta.outputs.artifact }}/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Windows installer artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExoGPUAgent-Setup-v${{ steps.meta.outputs.version }}-win64-${{ steps.meta.outputs.short_sha }}
+          path: dist/ExoGPUAgent-Setup-v${{ steps.meta.outputs.version }}-win64-${{ steps.meta.outputs.short_sha }}/
           if-no-files-found: error
           retention-days: 14

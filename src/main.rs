@@ -1,118 +1,167 @@
-//! ExoGPUAgent — local-first NVIDIA GPU telemetry HTTP agent.
+//! ExoGPUAgent — local-first NVIDIA GPU telemetry agent (Phase 2B Windows).
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
+
 use exogpuagent::config::Config;
-use exogpuagent::gpu::{CollectorError, GpuCollector, GpuSnapshot, NvmlCollector};
-use exogpuagent::http::{app_router, AppState};
+use exogpuagent::doctor;
+use exogpuagent::server;
+use exogpuagent::service;
+use exogpuagent::status;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "exogpuagent",
     about = "Lightweight local NVIDIA GPU telemetry agent",
-    version
+    version,
+    propagate_version = true
 )]
 struct Cli {
-    /// Path to config.toml (default: XDG / AppData ExoGPUAgent config).
-    #[arg(long)]
-    config: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Option<Commands>,
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    if let Err(err) = run().await {
-        eprintln!("exogpuagent: {err}");
-        std::process::exit(1);
-    }
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Run the HTTP agent in the foreground (portable / console).
+    Run {
+        /// Path to config.toml (default: user portable path).
+        #[arg(long)]
+        config: Option<PathBuf>,
+
+        /// Use machine-wide ProgramData config (same as the Windows service).
+        #[arg(long)]
+        machine: bool,
+    },
+
+    /// Show service + local /health status.
+    Status {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Force per-user portable config instead of ProgramData.
+        #[arg(long)]
+        portable: bool,
+    },
+
+    /// Diagnose NVML, config, bind policy, and local HTTP (does not stop the service).
+    Doctor {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Force per-user portable config instead of ProgramData.
+        #[arg(long)]
+        portable: bool,
+    },
+
+    /// Print version information.
+    Version,
+
+    /// Windows service management (requires elevation for install/uninstall).
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
 }
 
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+#[derive(Debug, Subcommand)]
+enum ServiceAction {
+    /// Register the Windows service (LocalService, auto-start).
+    Install {
+        /// Path to exogpuagent.exe (default: this executable).
+        #[arg(long)]
+        exe: Option<PathBuf>,
+    },
+    /// Stop and remove the Windows service.
+    Uninstall,
+    Start,
+    Stop,
+    Restart,
+}
 
-    let config_path = match cli.config {
-        Some(path) => path,
-        None => Config::default_path()?,
-    };
-
-    let config = Config::load_or_create(&config_path)?;
-    let addr: SocketAddr = config.socket_addr()?;
-
-    if !config.is_loopback() {
-        eprintln!("warning: binding to non-loopback address {addr} (default is 127.0.0.1)");
+fn main() -> ExitCode {
+    // When launched by Windows SCM, dispatch into the service entrypoint.
+    if service::maybe_dispatch_as_service() {
+        return ExitCode::SUCCESS;
     }
 
-    // NVML is initialized once at startup, off the request path.
-    let collector = match NvmlCollector::init() {
-        Ok(c) => {
-            eprintln!(
-                "NVML ready ({} GPU(s)); config {}",
-                c.gpu_count().unwrap_or(0),
-                config_path.display()
-            );
-            Arc::new(c) as Arc<dyn GpuCollector>
-        }
+    match run_cli() {
+        Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!(
-                "warning: NVML unavailable at startup ({err}); /health and /gpu will return 503 until the driver is available (restart required after fix)"
-            );
-            // Keep serving so /health returns a proper 503 JSON contract.
-            Arc::new(FailedCollector {
-                message: err.to_string(),
-            }) as Arc<dyn GpuCollector>
+            eprintln!("exogpuagent: {err}");
+            ExitCode::FAILURE
         }
-    };
+    }
+}
 
-    let state = AppState { collector };
-    let app = app_router(state);
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    eprintln!("listening on http://{addr}");
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-
+fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+    match cli.command.unwrap_or(Commands::Run {
+        config: None,
+        machine: false,
+    }) {
+        Commands::Run { config, machine } => {
+            let path = Config::resolve_path(config, machine)?;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(server::run_foreground(&path))?;
+        }
+        Commands::Status { config, portable } => {
+            let path = Config::resolve_admin_path(config, portable)?;
+            let report = status::run_status(&path);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Commands::Doctor { config, portable } => {
+            let path = Config::resolve_admin_path(config, portable)?;
+            let report = doctor::run_doctor(&path);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.ok {
+                return Err("doctor reported problems (see JSON above)".into());
+            }
+        }
+        Commands::Version => {
+            println!(
+                "exogpuagent {} ({})",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS
+            );
+        }
+        Commands::Service { action } => match action {
+            ServiceAction::Install { exe } => {
+                let exe = match exe {
+                    Some(p) => p,
+                    None => std::env::current_exe()?,
+                };
+                service::install(&exe)?;
+                println!("service {0} installed (LocalService, auto-start)", {
+                    #[cfg(windows)]
+                    {
+                        service::SERVICE_NAME
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        "ExoGPUAgent"
+                    }
+                });
+            }
+            ServiceAction::Uninstall => {
+                service::uninstall()?;
+                println!("service uninstalled");
+            }
+            ServiceAction::Start => {
+                service::start()?;
+                println!("service start requested");
+            }
+            ServiceAction::Stop => {
+                service::stop()?;
+                println!("service stop requested");
+            }
+            ServiceAction::Restart => {
+                service::restart()?;
+                println!("service restart requested");
+            }
+        },
+    }
     Ok(())
-}
-
-/// Collector that always reports unavailable (NVML failed at startup).
-struct FailedCollector {
-    message: String,
-}
-
-impl GpuCollector for FailedCollector {
-    fn gpu_count(&self) -> Result<usize, CollectorError> {
-        Err(CollectorError::Unavailable(self.message.clone()))
-    }
-
-    fn collect(&self) -> Result<Vec<GpuSnapshot>, CollectorError> {
-        Err(CollectorError::Unavailable(self.message.clone()))
-    }
-}
-
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => {},
-        () = terminate => {},
-    }
 }

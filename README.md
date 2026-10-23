@@ -5,30 +5,45 @@ Privacy-first, local by default. No cloud dependencies or telemetry collection.
 
 ## Status
 
-Phase 1 (Rust core): local HTTP agent exposing `/health` and `/gpu` via NVML.
+- **Phase 1:** Rust core — `/health` + `/gpu` via NVML  
+- **Phase 1.1 / 1.2:** Hardware validation docs + GitHub Actions builds  
+- **Phase 2B:** Windows service (SCM) + Inno Setup installer (`0.2.0`) — localhost only  
 
 ## Requirements
 
-- Rust 1.75+ (edition 2021)
-- NVIDIA driver with NVML (`libnvidia-ml` / `nvml.dll`) for live telemetry
+- Rust 1.75+ to build from source (end users: use CI artifacts / Setup.exe)
+- NVIDIA driver with NVML for live telemetry
 - Tests run without NVIDIA hardware (mock collector)
 
-## Quick start
+## Quick start (portable)
 
 ```bash
 cargo build --release
-./target/release/exogpuagent
-# optional: ./target/release/exogpuagent --config /path/to/config.toml
+./target/release/exogpuagent run
+# Windows: .\target\release\exogpuagent.exe run
 ```
 
 Default listen address: `http://127.0.0.1:12001`
 
-Config is created on first run under the platform config directory
-(XDG on Linux/macOS, AppData on Windows), unless `--config` is set.
-
 ```toml
+host_name = ""
 bind = "127.0.0.1"
 port = 12001
+access_mode = "localhost"
+autostart = true
+```
+
+- Portable config: platform user config dir (`directories`)  
+- Service config (Windows): `%ProgramData%\ExoGridTech\ExoGPUAgent\config.toml`
+
+## CLI
+
+```text
+exogpuagent run [--config PATH] [--machine]
+exogpuagent status [--portable]
+exogpuagent doctor [--portable]
+exogpuagent version
+exogpuagent service install|uninstall|start|stop|restart   # Windows
 ```
 
 ## API (JSON contract)
@@ -36,24 +51,17 @@ port = 12001
 - `GET /health` → `{"status":"ok","gpu_count":N}` or `503` `{"detail":"..."}`
 - `GET /gpu` → `gpu_count`, `total_gpu_power_w`, `gpus[]` with per-sensor `null`s
 
-## Hardware validation (Phase 1.1)
+## Windows installer (Phase 2B)
 
-Windows lab procedure (RTX 3090 example): [docs/phase-1.1-ck2-validation.md](docs/phase-1.1-ck2-validation.md)
+See [docs/phase-2b-windows.md](docs/phase-2b-windows.md).
 
-```powershell
-cargo build --release
-.\target\release\exogpuagent.exe
-# second terminal:
-.\scripts\windows\Validate-ExoGPUAgent.ps1
-```
+CI (manual): [docs/ci-build.md](docs/ci-build.md) — portable zip + `ExoGPUAgent-Setup-v0.2.0-win64.exe`.
 
 Keep `bind = "127.0.0.1"`. Do not expose port `12001` on Tailscale.
 
-## CI binaries (Phase 1.2)
+## Hardware validation
 
-Manual GitHub Actions builds for Windows/Linux: [docs/ci-build.md](docs/ci-build.md)
-
-Actions → **Build** → **Run workflow** → download the OS artifact (no GitHub Release yet).
+[docs/phase-1.1-ck2-validation.md](docs/phase-1.1-ck2-validation.md)
 
 ## Develop
 
