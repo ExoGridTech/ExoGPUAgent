@@ -49,6 +49,12 @@ cargo build --release
 
 Keep `bind = "127.0.0.1"`. Do not expose port `12001` on Tailscale.
 
+## CI binaries (Phase 1.2)
+
+Manual GitHub Actions builds for Windows/Linux: [docs/ci-build.md](docs/ci-build.md)
+
+Actions → **Build** → **Run workflow** → download the OS artifact (no GitHub Release yet).
+
 ## Develop
 
 ```bash

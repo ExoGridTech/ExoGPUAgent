@@ -1,0 +1,179 @@
+# Manual CI build for Windows/Linux release binaries (no GitHub Release).
+# NVML is loaded at runtime via libloading — runners do not need NVIDIA GPUs/drivers.
+
+name: Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            target_triple: x86_64-pc-windows-msvc
+            bin_name: exogpuagent.exe
+            artifact_os: windows-x64
+          - name: Linux x64
+            os: ubuntu-latest
+            target_triple: x86_64-unknown-linux-gnu
+            bin_name: exogpuagent
+            artifact_os: linux-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.artifact_os }}
+
+      - name: Read crate version
+        id: meta
+        shell: bash
+        run: |
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          ARTIFACT="exogpuagent-v${VERSION}-${{ matrix.artifact_os }}-${SHORT_SHA}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
+          echo "Packaging as ${ARTIFACT}"
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --all-targets
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      - name: Stage artifact (Linux .tar.gz)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARTIFACT="${{ steps.meta.outputs.artifact }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+          OS="${{ matrix.artifact_os }}"
+          OUT="dist/${ARTIFACT}"
+          PKG="dist/pkg"
+          VERSIONED="exogpuagent-v${VERSION}-${OS}"
+          TARBALL="${ARTIFACT}.tar.gz"
+
+          rm -rf "${OUT}" "${PKG}"
+          mkdir -p "${OUT}" "${PKG}"
+
+          install -m 0755 "target/release/${{ matrix.bin_name }}" "${PKG}/exogpuagent"
+          install -m 0755 "target/release/${{ matrix.bin_name }}" "${PKG}/${VERSIONED}"
+          cp README.md "${PKG}/README.md"
+
+          # Checksums of files that will live inside the tarball.
+          (
+            cd "${PKG}"
+            sha256sum exogpuagent "${VERSIONED}" README.md > SHA256SUMS.txt
+            sha256sum -c SHA256SUMS.txt
+            test -x exogpuagent
+            test -x "${VERSIONED}"
+          )
+
+          # Final redistributable: tar.gz preserves +x mode.
+          tar -C "${PKG}" -czf "${OUT}/${TARBALL}" \
+            exogpuagent "${VERSIONED}" README.md SHA256SUMS.txt
+
+          # Checksum of the distributed archive itself.
+          (
+            cd "${OUT}"
+            sha256sum "${TARBALL}" > SHA256SUMS.txt
+            sha256sum -c SHA256SUMS.txt
+          )
+
+          # Required final files must exist or this job fails before upload.
+          test -f "${OUT}/${TARBALL}"
+          test -f "${OUT}/SHA256SUMS.txt"
+          test -s "${OUT}/${TARBALL}"
+          test -s "${OUT}/SHA256SUMS.txt"
+
+          ls -la "${OUT}"
+          tar -tzvf "${OUT}/${TARBALL}"
+          cat "${OUT}/SHA256SUMS.txt"
+
+      - name: Stage artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $artifact = "${{ steps.meta.outputs.artifact }}"
+          $staging = "dist/$artifact"
+          if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+
+          $versioned = "exogpuagent-v${{ steps.meta.outputs.version }}-${{ matrix.artifact_os }}.exe"
+          $src = "target/release/${{ matrix.bin_name }}"
+          if (-not (Test-Path $src)) { throw "Missing release binary: $src" }
+
+          Copy-Item $src (Join-Path $staging $versioned)
+          Copy-Item $src (Join-Path $staging "exogpuagent.exe")
+          Copy-Item "README.md" (Join-Path $staging "README.md")
+
+          $sums = @()
+          foreach ($f in @($versioned, "exogpuagent.exe", "README.md")) {
+            $path = Join-Path $staging $f
+            if (-not (Test-Path $path)) { throw "Missing staged file: $path" }
+            $hash = (Get-FileHash -Algorithm SHA256 -Path $path).Hash.ToLower()
+            $sums += "$hash  $f"
+          }
+          $sumPath = Join-Path $staging "SHA256SUMS.txt"
+          ($sums -join "`n") + "`n" | Set-Content -NoNewline -Encoding ascii $sumPath
+
+          # Re-verify hashes match the final staged files.
+          foreach ($line in Get-Content $sumPath) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $parts = $line -split "\s+", 2
+            $expected = $parts[0].ToLower()
+            $name = $parts[1].Trim()
+            $actual = (Get-FileHash -Algorithm SHA256 -Path (Join-Path $staging $name)).Hash.ToLower()
+            if ($expected -ne $actual) {
+              throw "Checksum mismatch for $name : expected $expected got $actual"
+            }
+          }
+
+          foreach ($req in @($versioned, "exogpuagent.exe", "README.md", "SHA256SUMS.txt")) {
+            $p = Join-Path $staging $req
+            if (-not (Test-Path $p) -or ((Get-Item $p).Length -le 0)) {
+              throw "Required artifact file missing or empty: $p"
+            }
+          }
+
+          Get-ChildItem $staging | Format-Table Name, Length
+          Get-Content $sumPath
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact }}
+          path: dist/${{ steps.meta.outputs.artifact }}/
+          if-no-files-found: error
+          retention-days: 14
