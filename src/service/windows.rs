@@ -102,7 +102,7 @@ fn service_info_for(exe: &Path) -> ServiceInfo {
         name: OsString::from(SERVICE_NAME),
         display_name: OsString::from(SERVICE_DISPLAY),
         service_type: ServiceType::OWN_PROCESS,
-        start_type: ServiceStartType::Auto,
+        start_type: ServiceStartType::AutoStart,
         error_control: ServiceErrorControl::Normal,
         executable_path: exe.to_path_buf(),
         launch_arguments: vec![],
