@@ -179,13 +179,15 @@ begin
   if ((EnableGui = 'yes') or (EnableGui = 'y') or (EnableGui = 'true')) and (Length(Pass) >= 12) then
     GuiEnabled := 'true';
 
+  { Blank line before [gui]: use empty-string + CRLF chars, never a lone hash-digit line
+    (ISCC preprocessor would treat a leading hash as a directive). }
   SaveStringToFile(Cfg,
     'host_name = "' + HostName + '"'#13#10 +
     'bind = "127.0.0.1"'#13#10 +
     'port = ' + Port + #13#10 +
     'access_mode = "localhost"'#13#10 +
     'autostart = true'#13#10 +
-    #13#10 +
+    ''#13#10 +
     '[gui]'#13#10 +
     'enabled = ' + GuiEnabled + #13#10 +
     'bind = "127.0.0.1"'#13#10 +
