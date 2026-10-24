@@ -113,6 +113,21 @@ pub fn run_doctor(config_path: &Path) -> DoctorReport {
         "Phase 2C binds localhost only; no firewall rules, Tailscale, or remote access.".into(),
     );
     notes.push("No cloud telemetry; no AtlasGPU dependency.".into());
+    if config.gui.enabled {
+        notes.push(format!(
+            "Mini GUI enabled on {}:{} (admin auth file must exist beside config)",
+            config.gui.bind, config.gui.port
+        ));
+        let auth = crate::admin_auth::AdminAuthFile::path_beside_config(config_path);
+        if !auth.exists() {
+            notes.push(
+                "gui.enabled=true but admin_auth.toml missing — run: exogpuagent gui init".into(),
+            );
+            ok = false;
+        }
+    } else {
+        notes.push("Mini GUI disabled (gui.enabled=false).".into());
+    }
 
     DoctorReport {
         ok,

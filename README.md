@@ -8,7 +8,8 @@ Privacy-first, local by default. No cloud dependencies or telemetry collection.
 - **Phase 1:** Rust core — `/health` + `/gpu` via NVML  
 - **Phase 1.1 / 1.2:** Hardware validation docs + GitHub Actions builds  
 - **Phase 2B:** Windows service (SCM) + Inno Setup installer — localhost only  
-- **Phase 2C-B:** Linux systemd + Debian package (`0.3.0`) — localhost only; **no GUI yet**
+- **Phase 2C-B:** Linux systemd + Debian package — localhost only  
+- **Phase 2C-C2:** Optional local Mini GUI on `127.0.0.1:12010` (`0.4.0`, **off by default**)
 
 ## Requirements
 
@@ -47,7 +48,10 @@ exogpuagent doctor [--portable]
 exogpuagent version
 exogpuagent config path|show|set [--machine|--portable] [key=value ...]
 exogpuagent service install|uninstall|start|stop|restart
+exogpuagent gui init|url [--machine]
 ```
+
+Mini GUI (optional): [docs/phase-2c-c2-gui.md](docs/phase-2c-c2-gui.md).
 
 ## API (JSON contract)
 

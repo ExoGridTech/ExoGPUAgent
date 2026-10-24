@@ -47,11 +47,18 @@ async fn get_json(app: axum::Router, path: &str) -> (StatusCode, serde_json::Val
     (status, body)
 }
 
+fn test_app(collector: Arc<dyn exogpuagent::gpu::GpuCollector>) -> axum::Router {
+    app_router(AppState {
+        collector,
+        cache: Arc::new(exogpuagent::admin::SnapshotCache::new(
+            std::time::Duration::from_millis(10),
+        )),
+    })
+}
+
 #[tokio::test]
 async fn health_contract() {
-    let app = app_router(AppState {
-        collector: Arc::new(MockCollector::new(multi_gpu_fixture())),
-    });
+    let app = test_app(Arc::new(MockCollector::new(multi_gpu_fixture())));
     let (status, body) = get_json(app, "/health").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -65,9 +72,7 @@ async fn health_contract() {
 
 #[tokio::test]
 async fn gpu_contract_null_sensors_and_no_uuid() {
-    let app = app_router(AppState {
-        collector: Arc::new(MockCollector::new(multi_gpu_fixture())),
-    });
+    let app = test_app(Arc::new(MockCollector::new(multi_gpu_fixture())));
     let (status, body) = get_json(app, "/gpu").await;
     assert_eq!(status, StatusCode::OK);
 
@@ -94,11 +99,9 @@ async fn gpu_contract_null_sensors_and_no_uuid() {
 
 #[tokio::test]
 async fn error_contract_matches_fastapi_detail() {
-    let app = app_router(AppState {
-        collector: Arc::new(MockCollector::failing(
-            "Command '['nvidia-smi']' returned non-zero exit status 1.",
-        )),
-    });
+    let app = test_app(Arc::new(MockCollector::failing(
+        "Command '['nvidia-smi']' returned non-zero exit status 1.",
+    )));
     let (status, body) = get_json(app, "/gpu").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(

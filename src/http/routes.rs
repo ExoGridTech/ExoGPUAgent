@@ -8,6 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 
+use crate::admin::SnapshotCache;
 use crate::gpu::{CollectorError, GpuCollector};
 use crate::models::{ErrorDetail, GpuResponse, HealthResponse};
 
@@ -15,6 +16,7 @@ use crate::models::{ErrorDetail, GpuResponse, HealthResponse};
 #[derive(Clone)]
 pub struct AppState {
     pub collector: Arc<dyn GpuCollector>,
+    pub cache: Arc<SnapshotCache>,
 }
 
 pub fn app_router(state: AppState) -> Router {
@@ -26,7 +28,8 @@ pub fn app_router(state: AppState) -> Router {
 
 async fn health(State(state): State<AppState>) -> Response {
     let collector = Arc::clone(&state.collector);
-    match run_blocking(move || collector.gpu_count()).await {
+    let cache = Arc::clone(&state.cache);
+    match run_blocking(move || cache.gpu_count(collector.as_ref())).await {
         Ok(gpu_count) => Json(HealthResponse {
             status: "ok".to_string(),
             gpu_count,
@@ -38,7 +41,8 @@ async fn health(State(state): State<AppState>) -> Response {
 
 async fn gpu(State(state): State<AppState>) -> Response {
     let collector = Arc::clone(&state.collector);
-    match run_blocking(move || collector.collect()).await {
+    let cache = Arc::clone(&state.cache);
+    match run_blocking(move || cache.get(collector.as_ref())).await {
         Ok(snapshots) => {
             let gpus = snapshots.into_iter().map(|s| s.into_public()).collect();
             Json(GpuResponse::from_gpus(gpus)).into_response()
@@ -107,11 +111,18 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    fn test_state(collector: Arc<dyn crate::gpu::GpuCollector>) -> AppState {
+        AppState {
+            collector,
+            cache: Arc::new(crate::admin::SnapshotCache::new(
+                std::time::Duration::from_millis(50),
+            )),
+        }
+    }
+
     #[tokio::test]
     async fn health_ok() {
-        let state = AppState {
-            collector: Arc::new(MockCollector::new(sample_gpus())),
-        };
+        let state = test_state(Arc::new(MockCollector::new(sample_gpus())));
         let app = app_router(state);
         let response = app
             .oneshot(
@@ -131,9 +142,7 @@ mod tests {
 
     #[tokio::test]
     async fn gpu_ok_and_omits_uuid() {
-        let state = AppState {
-            collector: Arc::new(MockCollector::new(sample_gpus())),
-        };
+        let state = test_state(Arc::new(MockCollector::new(sample_gpus())));
         let app = app_router(state);
         let response = app
             .oneshot(Request::builder().uri("/gpu").body(Body::empty()).unwrap())
@@ -154,9 +163,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_503_fastapi_shape() {
-        let state = AppState {
-            collector: Arc::new(MockCollector::failing("NVML init failed")),
-        };
+        let state = test_state(Arc::new(MockCollector::failing("NVML init failed")));
         let app = app_router(state);
         let response = app
             .oneshot(
@@ -175,9 +182,7 @@ mod tests {
 
     #[tokio::test]
     async fn gpu_503_fastapi_shape() {
-        let state = AppState {
-            collector: Arc::new(MockCollector::failing("driver missing")),
-        };
+        let state = test_state(Arc::new(MockCollector::failing("driver missing")));
         let app = app_router(state);
         let response = app
             .oneshot(Request::builder().uri("/gpu").body(Body::empty()).unwrap())

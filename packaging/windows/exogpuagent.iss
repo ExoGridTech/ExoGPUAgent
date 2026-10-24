@@ -2,7 +2,7 @@
 ; Phase 2B — localhost only, native SCM service, no NVIDIA/Tailscale installers.
 
 #define MyAppName "ExoGPUAgent"
-#define MyAppVersion "0.3.0"
+#define MyAppVersion "0.4.0"
 #define MyAppPublisher "ExoGridTech"
 #define MyAppURL "https://github.com/ExoGridTech/ExoGPUAgent"
 #define MyAppExeName "exogpuagent.exe"
@@ -67,7 +67,9 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "service uninstall"; Flags: runhi
 var
   NvmlPage: TOutputMsgWizardPage;
   HostPage: TInputQueryWizardPage;
+  GuiPage: TInputQueryWizardPage;
   KeepData: Boolean;
+  IsFreshInstall: Boolean;
 
 function NvmlPresent(): Boolean;
 begin
@@ -90,18 +92,43 @@ begin
 
   HostPage := CreateInputQueryPage(wpSelectDir,
     'Basic configuration',
-    'Localhost-only agent (Phase 2B).',
+    'Localhost-only agent.',
     'Configuration is stored in %ProgramData%\ExoGridTech\ExoGPUAgent\config.toml'#13#10 +
     'Existing files are never overwritten on upgrade.');
   HostPage.Add('Host name (optional):', False);
   HostPage.Add('HTTP port (default 12001):', False);
   HostPage.Values[0] := GetComputerNameString;
   HostPage.Values[1] := '12001';
+
+  { Fresh-install only: optional Mini GUI. Hidden on upgrades (config already exists). }
+  GuiPage := CreateInputQueryPage(HostPage.ID,
+    'Local Mini GUI (optional)',
+    'Fresh installs only — upgrades never change GUI settings.',
+    'Enable a localhost admin UI on 127.0.0.1:12010 after install.'#13#10 +
+    'Leave password blank to skip GUI (default). Min 12 characters if enabled.');
+  GuiPage.Add('Enable Mini GUI? (yes/no, default no):', False);
+  GuiPage.Add('Admin password (min 12 chars, blank = skip GUI):', True);
+  GuiPage.Values[0] := 'no';
+  GuiPage.Values[1] := '';
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+var
+  Cfg: String;
+begin
+  Result := False;
+  if PageID = GuiPage.ID then
+  begin
+    Cfg := ExpandConstant('{commonappdata}\ExoGridTech\ExoGPUAgent\config.toml');
+    { Skip GUI page on upgrade / reinstall when config already exists. }
+    Result := FileExists(Cfg);
+  end;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   Port: Integer;
+  EnableGui, Pass: String;
 begin
   Result := True;
   if CurPageID = HostPage.ID then
@@ -113,27 +140,76 @@ begin
       Result := False;
     end;
   end;
+  if CurPageID = GuiPage.ID then
+  begin
+    EnableGui := LowerCase(Trim(GuiPage.Values[0]));
+    Pass := GuiPage.Values[1];
+    if (EnableGui = 'yes') or (EnableGui = 'y') or (EnableGui = 'true') then
+    begin
+      if Length(Pass) < 12 then
+      begin
+        MsgBox('Admin password must be at least 12 characters, or set Enable to no.', mbError, MB_OK);
+        Result := False;
+      end;
+    end;
+  end;
 end;
 
 procedure WriteConfigIfAbsent;
 var
-  Dir, Cfg, HostName, Port: String;
+  Dir, Cfg, HostName, Port, EnableGui, Pass, Auth, PassFile: String;
+  ResultCode: Integer;
+  GuiEnabled: String;
 begin
   Dir := ExpandConstant('{commonappdata}\ExoGridTech\ExoGPUAgent');
   ForceDirectories(Dir);
   ForceDirectories(Dir + '\logs');
   Cfg := Dir + '\config.toml';
-  if not FileExists(Cfg) then
+  IsFreshInstall := not FileExists(Cfg);
+  if not IsFreshInstall then
+    Exit;
+
+  HostName := Trim(HostPage.Values[0]);
+  Port := Trim(HostPage.Values[1]);
+  if Port = '' then Port := '12001';
+
+  EnableGui := LowerCase(Trim(GuiPage.Values[0]));
+  Pass := GuiPage.Values[1];
+  GuiEnabled := 'false';
+  if ((EnableGui = 'yes') or (EnableGui = 'y') or (EnableGui = 'true')) and (Length(Pass) >= 12) then
+    GuiEnabled := 'true';
+
+  SaveStringToFile(Cfg,
+    'host_name = "' + HostName + '"'#13#10 +
+    'bind = "127.0.0.1"'#13#10 +
+    'port = ' + Port + #13#10 +
+    'access_mode = "localhost"'#13#10 +
+    'autostart = true'#13#10 +
+    #13#10 +
+    '[gui]'#13#10 +
+    'enabled = ' + GuiEnabled + #13#10 +
+    'bind = "127.0.0.1"'#13#10 +
+    'port = 12010'#13#10 +
+    'poll_interval_secs = 5'#13#10, False);
+
+  { Bootstrap admin_auth.toml only on fresh install when GUI enabled.
+    Prefer --password-stdin so the password is not visible on the process command line. }
+  if GuiEnabled = 'true' then
   begin
-    HostName := Trim(HostPage.Values[0]);
-    Port := Trim(HostPage.Values[1]);
-    if Port = '' then Port := '12001';
-    SaveStringToFile(Cfg,
-      'host_name = "' + HostName + '"'#13#10 +
-      'bind = "127.0.0.1"'#13#10 +
-      'port = ' + Port + #13#10 +
-      'access_mode = "localhost"'#13#10 +
-      'autostart = true'#13#10, False);
+    Auth := Dir + '\admin_auth.toml';
+    if not FileExists(Auth) then
+    begin
+      PassFile := Dir + '\.gui_init_pass.tmp';
+      SaveStringToFile(PassFile, Pass + #13#10, False);
+      if not Exec(ExpandConstant('{cmd}'),
+        '/C type "' + PassFile + '" | "' + ExpandConstant('{app}\{#MyAppExeName}') +
+        '" gui init --machine --password-stdin',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+        MsgBox('WARNING: Mini GUI password bootstrap failed (exit ' + IntToStr(ResultCode) + ').' + #13#10 +
+          'Telemetry still works. Run later: exogpuagent gui init --machine --password-stdin',
+          mbInformation, MB_OK);
+      DeleteFile(PassFile);
+    end;
   end;
 end;
 

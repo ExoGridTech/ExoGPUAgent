@@ -59,7 +59,7 @@ impl From<std::io::Error> for RunError {
 /// failure) so callers (e.g. Windows SCM) can delay reporting `Running`.
 pub async fn run_with_shutdown(
     config_path: &Path,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
     ready: Option<mpsc::Sender<Result<SocketAddr, String>>>,
 ) -> Result<(), RunError> {
     let notify = |result: Result<SocketAddr, String>| {
@@ -113,7 +113,12 @@ pub async fn run_with_shutdown(
         }
     };
 
-    let state = AppState { collector };
+    let poll = Duration::from_secs(config.gui_poll_interval_secs());
+    let cache = Arc::new(crate::admin::SnapshotCache::new(poll));
+    let state = AppState {
+        collector: Arc::clone(&collector),
+        cache: Arc::clone(&cache),
+    };
     let app = app_router(state);
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -130,13 +135,23 @@ pub async fn run_with_shutdown(
     notify(Ok(addr));
     eprintln!("exogpuagent: listening on http://{addr}");
 
+    // Optional admin GUI — runs in background; bind/auth failures never stop telemetry.
+    maybe_spawn_admin(
+        config_path,
+        &config,
+        Arc::clone(&collector),
+        Arc::clone(&cache),
+        shutdown.clone(),
+    );
+
+    let mut shutdown_tel = shutdown;
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             loop {
-                if *shutdown.borrow() {
+                if *shutdown_tel.borrow() {
                     break;
                 }
-                if shutdown.changed().await.is_err() {
+                if shutdown_tel.changed().await.is_err() {
                     break;
                 }
             }
@@ -144,6 +159,79 @@ pub async fn run_with_shutdown(
         .await?;
 
     Ok(())
+}
+
+fn maybe_spawn_admin(
+    config_path: &Path,
+    config: &Config,
+    collector: Arc<dyn GpuCollector>,
+    cache: Arc<crate::admin::SnapshotCache>,
+    shutdown: watch::Receiver<bool>,
+) {
+    if !config.gui.enabled {
+        return;
+    }
+
+    let auth_path = crate::admin_auth::AdminAuthFile::path_beside_config(config_path);
+    if !crate::admin_auth::AdminAuthFile::exists(&auth_path) {
+        eprintln!(
+            "exogpuagent: warning: gui.enabled=true but admin credentials missing at {}; GUI not started (run: exogpuagent gui init)",
+            auth_path.display()
+        );
+        return;
+    }
+
+    let gui_addr = match config.gui_socket_addr() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("exogpuagent: warning: invalid GUI bind ({e}); GUI not started");
+            return;
+        }
+    };
+
+    let config_path = config_path.to_path_buf();
+    let config = config.clone();
+    tokio::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind(gui_addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!(
+                    "exogpuagent: warning: failed to bind admin GUI on {gui_addr}: {e} (telemetry continues)"
+                );
+                return;
+            }
+        };
+        eprintln!("exogpuagent: admin GUI listening on http://{gui_addr}");
+
+        let admin_state = crate::admin::AdminState {
+            config_path,
+            auth_path,
+            config: Arc::new(std::sync::RwLock::new(config)),
+            collector,
+            cache,
+            sessions: Arc::new(crate::admin::SessionStore::new()),
+            rate_limit: Arc::new(crate::admin::LoginRateLimiter::new()),
+            started_at: std::time::Instant::now(),
+            service_status: crate::service::service_state_string,
+        };
+        let app = crate::admin::admin_router(admin_state);
+        let mut shutdown = shutdown;
+        if let Err(e) = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                loop {
+                    if *shutdown.borrow() {
+                        break;
+                    }
+                    if shutdown.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await
+        {
+            eprintln!("exogpuagent: admin GUI listener error: {e}");
+        }
+    });
 }
 
 /// Console / portable run with Ctrl+C (and SIGTERM on Unix).

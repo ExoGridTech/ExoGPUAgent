@@ -47,8 +47,16 @@ configure)
     chmod 0750 "$ETC_DIR"
     chown root:"$GROUP_NAME" "$CFG"
     chmod 0640 "$CFG"
+    # Preserve admin_auth.toml across upgrades; ensure service user can read it.
+    if [ -f "$ETC_DIR/admin_auth.toml" ]; then
+        chown root:"$GROUP_NAME" "$ETC_DIR/admin_auth.toml"
+        chmod 0640 "$ETC_DIR/admin_auth.toml"
+    fi
     chown "$USER_NAME":"$GROUP_NAME" "$VAR_DIR"
     chmod 0750 "$VAR_DIR"
+
+    # Mini GUI stays off unless operator already set gui.enabled=true.
+    # Fresh enable: exogpuagent gui init && config set --machine gui.enabled=true && systemctl restart
 
     # Do NOT add exogpuagent to video/render/sudo or any privileged groups here.
     # NVML device access is host-specific; operators may adjust udev/ACLs in lab.

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ExoGPUAgent</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">ExoGPUAgent</div>
+    <nav id="nav" class="nav hidden">
+      <button type="button" data-view="dashboard">Dashboard</button>
+      <button type="button" data-view="settings">Settings</button>
+      <button type="button" data-view="diagnostics">Diagnostics</button>
+      <button type="button" id="btn-logout">Logout</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="view-login" class="panel">
+      <h1>Admin sign-in</h1>
+      <p class="muted">Local administration only. Bootstrap credentials with <code>exogpuagent gui init</code> before enabling the GUI.</p>
+      <form id="login-form">
+        <label>Password<input type="password" id="password" autocomplete="current-password" required minlength="12" /></label>
+        <button type="submit">Sign in</button>
+      </form>
+      <p id="login-error" class="error" hidden></p>
+    </section>
+
+    <section id="view-dashboard" class="panel hidden">
+      <h1>Dashboard</h1>
+      <div id="dash-meta" class="grid"></div>
+      <h2>GPUs</h2>
+      <div id="dash-gpus"></div>
+    </section>
+
+    <section id="view-settings" class="panel hidden">
+      <h1>Settings</h1>
+      <p class="muted">Remote / VPN / LAN access is not available in this build.</p>
+      <form id="settings-form">
+        <label>Hostname<input type="text" id="cfg-hostname" maxlength="128" /></label>
+        <label>UI poll interval (seconds)<input type="number" id="cfg-poll" min="2" max="60" /></label>
+        <fieldset disabled>
+          <legend>Read-only</legend>
+          <label>Telemetry bind<input type="text" id="cfg-bind" readonly /></label>
+          <label>Telemetry port<input type="text" id="cfg-port" readonly /></label>
+          <label>GUI bind<input type="text" id="cfg-gui-bind" readonly /></label>
+          <label>GUI port<input type="text" id="cfg-gui-port" readonly /></label>
+          <label>Config path<input type="text" id="cfg-path" readonly /></label>
+        </fieldset>
+        <button type="submit">Save</button>
+      </form>
+      <p id="settings-msg" class="ok" hidden></p>
+      <p id="settings-error" class="error" hidden></p>
+    </section>
+
+    <section id="view-diagnostics" class="panel hidden">
+      <h1>Diagnostics</h1>
+      <button type="button" id="btn-refresh-diag">Refresh</button>
+      <button type="button" id="btn-export-diag">Export redacted report</button>
+      <pre id="diag-out" class="code"></pre>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -12,6 +12,8 @@ use thiserror::Error;
 pub const DEFAULT_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 /// Default listen port (compatible with historical AtlasGPU agent collectors).
 pub const DEFAULT_PORT: u16 = 12_001;
+/// Default local admin GUI port (Phase 2C-C2).
+pub const DEFAULT_GUI_PORT: u16 = 12_010;
 
 /// Access mode. Phase 2B only accepts [`AccessMode::Localhost`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -35,6 +37,37 @@ impl AccessMode {
     }
 }
 
+/// Local Mini GUI settings (disabled by default; loopback only in 2C-C2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuiConfig {
+    /// When false, the admin listener is not started.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Admin bind address (must be loopback).
+    #[serde(default = "default_bind_string")]
+    pub bind: String,
+
+    /// Admin HTTP port (default 12010).
+    #[serde(default = "default_gui_port")]
+    pub port: u16,
+
+    /// Dashboard poll interval hint for the SPA (seconds).
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_secs: u64,
+}
+
+impl Default for GuiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_bind_string(),
+            port: default_gui_port(),
+            poll_interval_secs: default_poll_interval(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     /// Optional friendly host name (not exposed on `/gpu` yet).
@@ -49,17 +82,21 @@ pub struct Config {
     #[serde(default = "default_port")]
     pub port: u16,
 
-    /// Network access mode. Phase 2B: must remain `localhost`.
+    /// Network access mode. Phase 2B/2C: must remain `localhost` for live binds.
     #[serde(default)]
     pub access_mode: AccessMode,
 
-    /// Reserved for future remote auth (never logged). Empty in 2B.
+    /// Reserved for future remote auth (never logged). Empty in 2C-C2.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auth_token: String,
 
     /// Whether the Windows/Linux service should autostart (installer hint).
     #[serde(default = "default_true")]
     pub autostart: bool,
+
+    /// Local admin Mini GUI (optional). Absent in old configs → defaults.
+    #[serde(default)]
+    pub gui: GuiConfig,
 }
 
 fn default_bind_string() -> String {
@@ -68,6 +105,14 @@ fn default_bind_string() -> String {
 
 fn default_port() -> u16 {
     DEFAULT_PORT
+}
+
+fn default_gui_port() -> u16 {
+    DEFAULT_GUI_PORT
+}
+
+fn default_poll_interval() -> u64 {
+    5
 }
 
 fn default_true() -> bool {
@@ -83,6 +128,7 @@ impl Default for Config {
             access_mode: AccessMode::Localhost,
             auth_token: String::new(),
             autostart: true,
+            gui: GuiConfig::default(),
         }
     }
 }
@@ -221,6 +267,15 @@ impl Config {
         Ok(SocketAddr::new(ip, self.port))
     }
 
+    pub fn gui_socket_addr(&self) -> Result<SocketAddr, ConfigError> {
+        let ip: IpAddr = self
+            .gui
+            .bind
+            .parse()
+            .map_err(|_| ConfigError::InvalidBind(self.gui.bind.clone()))?;
+        Ok(SocketAddr::new(ip, self.gui.port))
+    }
+
     pub fn is_loopback(&self) -> bool {
         self.bind
             .parse::<IpAddr>()
@@ -228,15 +283,22 @@ impl Config {
             .unwrap_or(false)
     }
 
+    /// Clamp GUI poll interval to a safe range for the SPA.
+    pub fn gui_poll_interval_secs(&self) -> u64 {
+        self.gui.poll_interval_secs.clamp(2, 60)
+    }
+
     /// Redacted view for logs/doctor (never includes auth_token).
     pub fn safe_summary(&self) -> String {
         format!(
-            "host_name={:?} bind={} port={} access_mode={} autostart={}",
+            "host_name={:?} bind={} port={} access_mode={} autostart={} gui.enabled={} gui.port={}",
             self.host_name,
             self.bind,
             self.port,
             self.access_mode.as_str(),
-            self.autostart
+            self.autostart,
+            self.gui.enabled,
+            self.gui.port
         )
     }
 }
@@ -263,6 +325,23 @@ mod tests {
         assert!(cfg.is_loopback());
         let addr = cfg.socket_addr().unwrap();
         assert_eq!(addr.to_string(), "127.0.0.1:12001");
+        assert!(!cfg.gui.enabled);
+        assert_eq!(cfg.gui.port, 12_010);
+    }
+
+    #[test]
+    fn old_config_without_gui_section_loads() {
+        let path = temp_config_path("oldgui");
+        fs::write(
+            &path,
+            "bind = \"127.0.0.1\"\nport = 12001\nhost_name = \"legacy\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.host_name, "legacy");
+        assert!(!cfg.gui.enabled);
+        assert_eq!(cfg.gui.port, DEFAULT_GUI_PORT);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]

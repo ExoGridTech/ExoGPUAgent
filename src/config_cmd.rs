@@ -93,9 +93,34 @@ pub fn set(path: &Path, assignments: &[String]) -> Result<SetResult, ConfigCmdEr
                     "auth_token cannot be set via CLI in this build (reserved)".into(),
                 ));
             }
+            "gui.enabled" => {
+                cfg.gui.enabled = parse_bool(value)?;
+                restart_required = true;
+            }
+            "gui.bind" => {
+                cfg.gui.bind = value.to_string();
+                restart_required = true;
+            }
+            "gui.port" => {
+                cfg.gui.port = value
+                    .parse::<u16>()
+                    .map_err(|_| ConfigCmdError::Msg(format!("invalid gui.port '{value}'")))?;
+                restart_required = true;
+            }
+            "gui.poll_interval_secs" => {
+                let n = value.parse::<u64>().map_err(|_| {
+                    ConfigCmdError::Msg(format!("invalid gui.poll_interval_secs '{value}'"))
+                })?;
+                if !(2..=60).contains(&n) {
+                    return Err(ConfigCmdError::Msg(
+                        "gui.poll_interval_secs must be between 2 and 60".into(),
+                    ));
+                }
+                cfg.gui.poll_interval_secs = n;
+            }
             other => {
                 return Err(ConfigCmdError::Msg(format!(
-                    "unknown config key '{other}' (allowed: host_name, bind, port, access_mode, autostart)"
+                    "unknown config key '{other}' (allowed: host_name, bind, port, access_mode, autostart, gui.enabled, gui.bind, gui.port, gui.poll_interval_secs)"
                 )));
             }
         }
