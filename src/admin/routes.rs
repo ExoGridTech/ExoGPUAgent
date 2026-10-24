@@ -17,6 +17,7 @@ use crate::admin::rate_limit::LoginRateLimiter;
 use crate::admin::session::{peer_bucket, SessionStore};
 use crate::admin::snapshot::SnapshotCache;
 use crate::admin::static_files;
+use crate::admin::telemetry_status::{TelemetryStatus, SOURCE_SHARED_CACHE};
 use crate::admin_auth::AdminAuthFile;
 use crate::config::Config;
 use crate::gpu::GpuCollector;
@@ -177,6 +178,8 @@ struct DashboardResponse {
     gpu_count: usize,
     gpus: Vec<GpuInfo>,
     gpus_note: Option<String>,
+    /// Brief collector/cache label for the dashboard card (not a live HTTP probe).
+    /// Field name kept for Mini GUI JSON compatibility.
     telemetry_http: String,
     service: String,
 }
@@ -184,7 +187,12 @@ struct DashboardResponse {
 async fn dashboard(State(state): State<AdminState>) -> Response {
     let cfg = state.config.read().expect("config lock").clone();
     let uptime = state.started_at.elapsed().as_secs();
-    let (nvml_status, gpus, gpus_note) = match state.cache.get(state.collector.as_ref()) {
+
+    // One shared-cache read (same path as GET /health / /gpu). Never block on
+    // loopback HTTP to this process — that deadlocks Tokio current_thread.
+    let cache_result = state.cache.get(state.collector.as_ref());
+    let telemetry = TelemetryStatus::from_cache_result(&cache_result);
+    let (nvml_status, gpus, gpus_note) = match cache_result {
         Ok(snaps) => {
             let gpus: Vec<GpuInfo> = snaps.into_iter().map(|s| s.into_public()).collect();
             ("ok".to_string(), gpus, None)
@@ -194,11 +202,6 @@ async fn dashboard(State(state): State<AdminState>) -> Response {
             Vec::new(),
             Some("NVML unavailable or no readable GPUs".into()),
         ),
-    };
-
-    let telemetry_http = match crate::local_http::get_json_loopback(cfg.port, "/health") {
-        Ok((code, _)) => format!("HTTP {code}"),
-        Err(e) => format!("unreachable ({e})"),
     };
 
     let hostname = if cfg.host_name.is_empty() {
@@ -220,7 +223,7 @@ async fn dashboard(State(state): State<AdminState>) -> Response {
         gpu_count: gpus.len(),
         gpus,
         gpus_note,
-        telemetry_http,
+        telemetry_http: telemetry.brief,
         service: (state.service_status)(),
     })
     .into_response()
@@ -228,7 +231,13 @@ async fn dashboard(State(state): State<AdminState>) -> Response {
 
 async fn diagnostics(State(state): State<AdminState>) -> Response {
     let cfg = state.config.read().expect("config lock").clone();
-    let report = crate::doctor::run_doctor(&state.config_path);
+    let cache_result = state.cache.get(state.collector.as_ref());
+    let telemetry = TelemetryStatus::from_cache_result(&cache_result);
+    let health_line = format!("{} — {}", telemetry.brief, telemetry.detail);
+    let report = crate::doctor::run_doctor_with(
+        &state.config_path,
+        crate::doctor::DoctorOptions::in_process(health_line.clone()),
+    );
     let mut redacted = serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = redacted.as_object_mut() {
         obj.insert(
@@ -245,10 +254,20 @@ async fn diagnostics(State(state): State<AdminState>) -> Response {
         "gui_enabled": cfg.gui.enabled,
         "gui_port": cfg.gui.port,
         "telemetry_port": cfg.port,
+        "telemetry_status": {
+            "source": SOURCE_SHARED_CACHE,
+            "kind": "collector_cache",
+            "brief": telemetry.brief,
+            "detail": telemetry.detail,
+            "ok": telemetry.ok,
+            "gpu_count": telemetry.gpu_count,
+            "http_listener_probed": false,
+            "note": "Reflects NVML/collector via shared cache only. Live HTTP /health of the telemetry listener is not probed in-process (avoids current_thread self-deadlock). Use CLI: exogpuagent doctor",
+        },
         "service": (state.service_status)(),
         "doctor": redacted,
         "generated_unix": SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
-        "note": "Redacted diagnostics export — no passwords, tokens, or session cookies",
+        "note": "Redacted diagnostics — no passwords/tokens. Collector status source=shared_cache; HTTP listener not self-probed.",
     }))
     .into_response()
 }

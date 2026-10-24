@@ -24,7 +24,39 @@ pub struct DoctorReport {
     pub notes: Vec<String>,
 }
 
+/// Options for [`run_doctor`].
+#[derive(Debug, Clone, Default)]
+pub struct DoctorOptions {
+    /// When false, skip the loopback HTTP probe (required for in-process Mini GUI
+    /// diagnostics on a Tokio `current_thread` runtime to avoid self-deadlock).
+    pub probe_http: bool,
+    /// Optional precomputed health line (e.g. from shared cache).
+    pub health_override: Option<String>,
+}
+
+impl DoctorOptions {
+    /// CLI / external process: probe `127.0.0.1:<port>/health` over TCP.
+    pub fn cli() -> Self {
+        Self {
+            probe_http: true,
+            health_override: None,
+        }
+    }
+
+    /// In-process Mini GUI: never block on self-HTTP.
+    pub fn in_process(health_line: String) -> Self {
+        Self {
+            probe_http: false,
+            health_override: Some(health_line),
+        }
+    }
+}
+
 pub fn run_doctor(config_path: &Path) -> DoctorReport {
+    run_doctor_with(config_path, DoctorOptions::cli())
+}
+
+pub fn run_doctor_with(config_path: &Path, opts: DoctorOptions) -> DoctorReport {
     let mut notes = Vec::new();
     // Hard failures only: invalid config / net policy. NVML absence is a soft note
     // (daemon may still run and serve 503 on /gpu).
@@ -86,24 +118,32 @@ pub fn run_doctor(config_path: &Path) -> DoctorReport {
         }
     };
 
-    let health_http = match local_http::get_json_loopback(port, "/health") {
-        Ok((status, body)) => {
-            if status == 200 {
-                format!("ok HTTP {status} {body}")
-            } else {
-                format!("HTTP {status} {body}")
+    let health_http = if let Some(override_line) = opts.health_override {
+        notes
+            .push("telemetry health from in-process shared cache (HTTP self-probe skipped)".into());
+        override_line
+    } else if opts.probe_http {
+        match local_http::get_json_loopback(port, "/health") {
+            Ok((status, body)) => {
+                if status == 200 {
+                    format!("ok HTTP {status} {body}")
+                } else {
+                    format!("HTTP {status} {body}")
+                }
+            }
+            Err(e) => {
+                if port_free == Some(false) {
+                    format!("port busy but /health failed: {e}")
+                } else {
+                    format!("not listening ({e})")
+                }
             }
         }
-        Err(e) => {
-            if port_free == Some(false) {
-                format!("port busy but /health failed: {e}")
-            } else {
-                format!("not listening ({e})")
-            }
-        }
+    } else {
+        "HTTP probe skipped".into()
     };
 
-    if port_free == Some(false) && health_http.starts_with("port busy") {
+    if opts.probe_http && port_free == Some(false) && health_http.starts_with("port busy") {
         notes.push(format!(
             "port {bind}:{port} is in use but did not answer /health — resolve the conflict or change port in config.toml"
         ));

@@ -78,7 +78,7 @@
       card("Uptime", d.uptime_human),
       card("NVML", d.nvml_status),
       card("GPU count", d.gpu_count),
-      card("Telemetry API", d.telemetry_http),
+      card("Collector", d.telemetry_http),
       card("Service", d.service),
     ].join("");
     const gpus = d.gpus || [];
