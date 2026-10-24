@@ -255,7 +255,8 @@ begin
     Exit;
   end;
 
-  { Temp under Setup {tmp} only — never ProgramData. Password never on argv. }
+  // Temp under Setup tmp dir only — never ProgramData. Password never on argv.
+  // (Do not put ExpandConstant names like tmp inside Pascal brace comments.)
   PassFile := ExpandConstant('{tmp}\ega_gui_pass.tmp');
   Ps1 := ExpandConstant('{app}\scripts\Bootstrap-GuiAuth.ps1');
   try
