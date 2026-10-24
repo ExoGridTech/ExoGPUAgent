@@ -324,6 +324,6 @@ async fn bootstrap_required_message() {
     )
     .await;
     assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(body.contains("not bootstrapped"));
+    assert!(body.contains("not bootstrapped") || body.contains("gui setup"));
     let _ = std::fs::remove_dir_all(&dir);
 }

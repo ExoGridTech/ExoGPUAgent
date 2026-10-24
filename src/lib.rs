@@ -6,6 +6,7 @@ pub mod config;
 pub mod config_cmd;
 pub mod doctor;
 pub mod gpu;
+pub mod gui_cli;
 pub mod http;
 pub mod local_http;
 pub mod models;

@@ -37,7 +37,7 @@ pub enum AdminAuthError {
     TomlSer(#[from] toml::ser::Error),
     #[error("password hashing failed")]
     Hash,
-    #[error("admin credentials are not bootstrapped; run: exogpuagent gui init")]
+    #[error("admin credentials are not bootstrapped; run: exogpuagent gui setup")]
     NotBootstrapped,
     #[error("admin credentials already exist (refusing to overwrite)")]
     AlreadyExists,

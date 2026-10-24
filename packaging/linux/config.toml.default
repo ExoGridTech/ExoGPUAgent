@@ -9,8 +9,9 @@ access_mode = "localhost"
 autostart = true
 
 # Mini GUI (Phase 2C-C2) — disabled by default; never auto-enabled on upgrade.
-# Bootstrap: exogpuagent gui init --machine --password-stdin
-# Then:     exogpuagent config set --machine gui.enabled=true && systemctl restart exogpuagent
+# Enable interactively (recommended):  sudo exogpuagent gui setup
+# Non-interactive: printf '%s\n' 'secret' | sudo exogpuagent gui init --password-stdin
+#   && sudo exogpuagent config set --machine gui.enabled=true && sudo systemctl restart exogpuagent
 [gui]
 enabled = false
 bind = "127.0.0.1"

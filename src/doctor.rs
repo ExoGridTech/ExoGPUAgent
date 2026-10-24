@@ -121,7 +121,7 @@ pub fn run_doctor(config_path: &Path) -> DoctorReport {
         let auth = crate::admin_auth::AdminAuthFile::path_beside_config(config_path);
         if !auth.exists() {
             notes.push(
-                "gui.enabled=true but admin_auth.toml missing — run: exogpuagent gui init".into(),
+                "gui.enabled=true but admin_auth.toml missing — run: exogpuagent gui setup".into(),
             );
             ok = false;
         }

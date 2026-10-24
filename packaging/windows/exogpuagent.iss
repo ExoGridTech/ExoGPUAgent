@@ -45,9 +45,11 @@ Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\docs\phase-2b-windows.md"; DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "scripts\Check-Port.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "scripts\Verify-Health.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
+Source: "scripts\Bootstrap-GuiAuth.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName} Doctor"; Filename: "{app}\{#MyAppExeName}"; Parameters: "doctor"
+Name: "{group}\{#MyAppName} Mini GUI Setup"; Filename: "{app}\{#MyAppExeName}"; Parameters: "gui setup"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
 [Run]
@@ -104,12 +106,15 @@ begin
   GuiPage := CreateInputQueryPage(HostPage.ID,
     'Local Mini GUI (optional)',
     'Fresh installs only — upgrades never change GUI settings.',
-    'Enable a localhost admin UI on 127.0.0.1:12010 after install.'#13#10 +
-    'Leave password blank to skip GUI (default). Min 12 characters if enabled.');
+    'Optional localhost admin UI on 127.0.0.1:12010 (never Tailscale/LAN).'#13#10 +
+    'Default is disabled. If enabling: password min 12 chars + confirmation.'#13#10 +
+    'Leave Enable as no (or blank passwords) to skip.');
   GuiPage.Add('Enable Mini GUI? (yes/no, default no):', False);
-  GuiPage.Add('Admin password (min 12 chars, blank = skip GUI):', True);
+  GuiPage.Add('Admin password (min 12 chars):', True);
+  GuiPage.Add('Confirm admin password:', True);
   GuiPage.Values[0] := 'no';
   GuiPage.Values[1] := '';
+  GuiPage.Values[2] := '';
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -128,7 +133,7 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   Port: Integer;
-  EnableGui, Pass: String;
+  EnableGui, Pass, Confirm: String;
 begin
   Result := True;
   if CurPageID = HostPage.ID then
@@ -144,43 +149,48 @@ begin
   begin
     EnableGui := LowerCase(Trim(GuiPage.Values[0]));
     Pass := GuiPage.Values[1];
+    Confirm := GuiPage.Values[2];
     if (EnableGui = 'yes') or (EnableGui = 'y') or (EnableGui = 'true') then
     begin
       if Length(Pass) < 12 then
       begin
         MsgBox('Admin password must be at least 12 characters, or set Enable to no.', mbError, MB_OK);
         Result := False;
+      end
+      else if Pass <> Confirm then
+      begin
+        MsgBox('Password and confirmation do not match.', mbError, MB_OK);
+        Result := False;
       end;
     end;
   end;
 end;
 
-procedure WriteConfigIfAbsent;
-var
-  Dir, Cfg, HostName, Port, EnableGui, Pass, Auth, PassFile: String;
-  ResultCode: Integer;
-  GuiEnabled: String;
+procedure WipeAndDeleteFile(const Path: String);
 begin
-  Dir := ExpandConstant('{commonappdata}\ExoGridTech\ExoGPUAgent');
-  ForceDirectories(Dir);
-  ForceDirectories(Dir + '\logs');
-  Cfg := Dir + '\config.toml';
-  IsFreshInstall := not FileExists(Cfg);
-  if not IsFreshInstall then
-    Exit;
+  { Best-effort cleanup only — not a forensic secure erase. }
+  if FileExists(Path) then
+  begin
+    SaveStringToFile(Path, 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', False);
+    DeleteFile(Path);
+  end;
+end;
 
-  HostName := Trim(HostPage.Values[0]);
-  Port := Trim(HostPage.Values[1]);
-  if Port = '' then Port := '12001';
+procedure RestrictPassFileAcl(const Path: String);
+var
+  RC: Integer;
+begin
+  { Create-time ACL: drop inheritance; current user + SYSTEM only (SID S-1-5-18). }
+  Exec(ExpandConstant('{sys}\icacls.exe'),
+    '"' + Path + '" /inheritance:r /grant:r "' + GetUserNameString +
+    '":F /grant:r *S-1-5-18:F',
+    '', SW_HIDE, ewWaitUntilTerminated, RC);
+end;
 
-  EnableGui := LowerCase(Trim(GuiPage.Values[0]));
-  Pass := GuiPage.Values[1];
-  GuiEnabled := 'false';
-  if ((EnableGui = 'yes') or (EnableGui = 'y') or (EnableGui = 'true')) and (Length(Pass) >= 12) then
-    GuiEnabled := 'true';
-
-  { Blank line before [gui]: use empty-string + CRLF chars, never a lone hash-digit line
-    (ISCC preprocessor would treat a leading hash as a directive). }
+procedure WriteGuiConfig(const Cfg, HostName, Port, GuiEnabled: String);
+begin
+  { Blank line before [gui]: attach CRLF to an empty string — never start a line with #digits
+    (ISCC preprocessor would treat that as a directive). }
   SaveStringToFile(Cfg,
     'host_name = "' + HostName + '"'#13#10 +
     'bind = "127.0.0.1"'#13#10 +
@@ -193,26 +203,104 @@ begin
     'bind = "127.0.0.1"'#13#10 +
     'port = 12010'#13#10 +
     'poll_interval_secs = 5'#13#10, False);
+end;
 
-  { Bootstrap admin_auth.toml only on fresh install when GUI enabled.
-    Prefer --password-stdin so the password is not visible on the process command line. }
-  if GuiEnabled = 'true' then
+procedure WriteConfigIfAbsent;
+var
+  Dir, Cfg, HostName, Port, EnableGui, Pass, Confirm, Auth, PassFile, Ps1: String;
+  ResultCode: Integer;
+  WantGui: Boolean;
+begin
+  Dir := ExpandConstant('{commonappdata}\ExoGridTech\ExoGPUAgent');
+  ForceDirectories(Dir);
+  ForceDirectories(Dir + '\logs');
+  Cfg := Dir + '\config.toml';
+  IsFreshInstall := not FileExists(Cfg);
+  { Upgrades: never overwrite config/auth; never re-enable GUI. }
+  if not IsFreshInstall then
+    Exit;
+
+  HostName := Trim(HostPage.Values[0]);
+  Port := Trim(HostPage.Values[1]);
+  if Port = '' then Port := '12001';
+
+  EnableGui := LowerCase(Trim(GuiPage.Values[0]));
+  Pass := GuiPage.Values[1];
+  Confirm := GuiPage.Values[2];
+  WantGui := ((EnableGui = 'yes') or (EnableGui = 'y') or (EnableGui = 'true')) and
+    (Length(Pass) >= 12) and (Pass = Confirm);
+
+  { Always write gui.enabled=false first; flip to true only after secure bootstrap. }
+  WriteGuiConfig(Cfg, HostName, Port, 'false');
+
+  if not WantGui then
   begin
-    Auth := Dir + '\admin_auth.toml';
-    if not FileExists(Auth) then
-    begin
-      PassFile := Dir + '\.gui_init_pass.tmp';
-      SaveStringToFile(PassFile, Pass + #13#10, False);
-      if not Exec(ExpandConstant('{cmd}'),
-        '/C type "' + PassFile + '" | "' + ExpandConstant('{app}\{#MyAppExeName}') +
-        '" gui init --machine --password-stdin',
-        '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
-        MsgBox('WARNING: Mini GUI password bootstrap failed (exit ' + IntToStr(ResultCode) + ').' + #13#10 +
-          'Telemetry still works. Run later: exogpuagent gui init --machine --password-stdin',
-          mbInformation, MB_OK);
-      DeleteFile(PassFile);
-    end;
+    Pass := '';
+    Confirm := '';
+    GuiPage.Values[1] := '';
+    GuiPage.Values[2] := '';
+    Exit;
   end;
+
+  Auth := Dir + '\admin_auth.toml';
+  if FileExists(Auth) then
+  begin
+    { Unexpected on fresh install — leave disabled rather than overwrite password. }
+    MsgBox('admin_auth.toml already exists; Mini GUI left disabled. Use: exogpuagent gui setup',
+      mbInformation, MB_OK);
+    Pass := '';
+    Confirm := '';
+    GuiPage.Values[1] := '';
+    GuiPage.Values[2] := '';
+    Exit;
+  end;
+
+  { Temp under Setup {tmp} only — never ProgramData. Password never on argv. }
+  PassFile := ExpandConstant('{tmp}\ega_gui_pass.tmp');
+  Ps1 := ExpandConstant('{app}\scripts\Bootstrap-GuiAuth.ps1');
+  try
+    { Empty file → restrictive ACL → then write secret (narrow window). }
+    SaveStringToFile(PassFile, '', False);
+    RestrictPassFileAcl(PassFile);
+    SaveStringToFile(PassFile, Pass + #13#10, False);
+    Pass := '';
+    Confirm := '';
+    GuiPage.Values[1] := '';
+    GuiPage.Values[2] := '';
+    if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -ExecutionPolicy Bypass -File "' + Ps1 +
+      '" -ExePath "' + ExpandConstant('{app}\{#MyAppExeName}') +
+      '" -PassFile "' + PassFile + '"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+    begin
+      WipeAndDeleteFile(PassFile);
+      MsgBox('WARNING: Mini GUI credential bootstrap failed (exit ' + IntToStr(ResultCode) + ').' + #13#10 +
+        'Telemetry on 127.0.0.1 still works. GUI left disabled.'#13#10 +
+        'Later: Start Menu → ExoGPUAgent Mini GUI Setup   or   exogpuagent gui setup',
+        mbInformation, MB_OK);
+      Exit;
+    end;
+    WipeAndDeleteFile(PassFile);
+    if FileExists(Auth) then
+      WriteGuiConfig(Cfg, HostName, Port, 'true')
+    else
+      MsgBox('WARNING: bootstrap reported success but admin_auth.toml is missing. GUI left disabled.',
+        mbInformation, MB_OK);
+  except
+    WipeAndDeleteFile(PassFile);
+    Pass := '';
+    Confirm := '';
+    GuiPage.Values[1] := '';
+    GuiPage.Values[2] := '';
+    MsgBox('WARNING: Mini GUI setup failed unexpectedly. GUI left disabled. Run: exogpuagent gui setup',
+      mbInformation, MB_OK);
+  end;
+end;
+
+procedure DeinitializeSetup;
+begin
+  { Cancel / early exit / success: ensure Setup-temp pass file is gone. }
+  WipeAndDeleteFile(ExpandConstant('{tmp}\ega_gui_pass.tmp'));
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

@@ -175,7 +175,7 @@ fn maybe_spawn_admin(
     let auth_path = crate::admin_auth::AdminAuthFile::path_beside_config(config_path);
     if !crate::admin_auth::AdminAuthFile::exists(&auth_path) {
         eprintln!(
-            "exogpuagent: warning: gui.enabled=true but admin credentials missing at {}; GUI not started (run: exogpuagent gui init)",
+            "exogpuagent: warning: gui.enabled=true but admin credentials missing at {}; GUI not started (run: exogpuagent gui setup)",
             auth_path.display()
         );
         return;

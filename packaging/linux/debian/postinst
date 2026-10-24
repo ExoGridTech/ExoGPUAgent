@@ -56,7 +56,8 @@ configure)
     chmod 0750 "$VAR_DIR"
 
     # Mini GUI stays off unless operator already set gui.enabled=true.
-    # Fresh enable: exogpuagent gui init && config set --machine gui.enabled=true && systemctl restart
+    # Never run interactive prompts here (headless APT). After install:
+    #   sudo exogpuagent gui setup
 
     # Do NOT add exogpuagent to video/render/sudo or any privileged groups here.
     # NVML device access is host-specific; operators may adjust udev/ACLs in lab.

@@ -1,15 +1,14 @@
 //! ExoGPUAgent — local-first NVIDIA GPU telemetry agent (Phase 2C-C2 Mini GUI).
 
-use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use exogpuagent::admin_auth::AdminAuthFile;
 use exogpuagent::config::Config;
 use exogpuagent::config_cmd;
 use exogpuagent::doctor;
+use exogpuagent::gui_cli::{self, BootstrapPlan};
 use exogpuagent::server;
 use exogpuagent::service;
 use exogpuagent::status;
@@ -72,7 +71,7 @@ enum Commands {
         action: ServiceAction,
     },
 
-    /// Local Mini GUI helpers (bootstrap credentials / print URL).
+    /// Local Mini GUI helpers (bootstrap credentials / enable / print URL).
     Gui {
         #[command(subcommand)]
         action: GuiAction,
@@ -81,7 +80,9 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum GuiAction {
-    /// Create admin credentials (required before enabling the GUI). Does not enable the listener.
+    /// Create admin credentials only (does not enable the listener).
+    ///
+    /// With a TTY and no password flags, prompts for a hidden password + confirmation.
     /// Defaults to machine config (ProgramData /etc); use --portable for per-user installs.
     Init {
         #[arg(long)]
@@ -92,12 +93,29 @@ enum GuiAction {
         /// Use per-user portable config instead of machine/service path.
         #[arg(long)]
         portable: bool,
-        /// Admin password (min 12 chars). Prefer --password-stdin in scripts.
+        /// Discouraged: password on argv (visible in process listings). Prefer interactive or --password-stdin.
         #[arg(long)]
         password: Option<String>,
-        /// Read password from stdin (single line).
+        /// Read exactly one password line from stdin (for scripts/CI). Example: printf '%s\n' 'secret' | exogpuagent gui init --password-stdin
         #[arg(long)]
         password_stdin: bool,
+    },
+    /// Interactive wizard: create credentials (if needed), enable localhost GUI, restart service.
+    ///
+    /// Preferred on Linux after DEB install. Not run by APT maintainer scripts.
+    Setup {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        machine: bool,
+        #[arg(long)]
+        portable: bool,
+        /// Skip the enable confirmation prompt (still requires credentials or a TTY to create them).
+        #[arg(long)]
+        yes: bool,
+        /// Do not restart the OS service after enabling.
+        #[arg(long)]
+        no_restart: bool,
     },
     /// Print the local GUI URL (does not start a browser from the service).
     Url {
@@ -293,33 +311,21 @@ fn run_cli() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 password,
                 password_stdin,
             } => {
-                // Default to machine/service config so LocalService/systemd can read
-                // admin_auth.toml. Use --portable only for per-user portable runs.
-                let cfg_path = resolve_gui_config_path(config, machine, portable)?;
-                let auth_path = AdminAuthFile::path_beside_config(&cfg_path);
-                // Ensure machine config dir exists (do not clobber existing config.toml).
-                let _ = Config::save_if_absent(&cfg_path);
-                let password = if password_stdin {
-                    let mut buf = String::new();
-                    io::stdin().read_to_string(&mut buf)?;
-                    buf.lines().next().unwrap_or("").to_string()
-                } else if let Some(p) = password {
-                    p
-                } else {
-                    return Err(
-                        "password required: pass --password or --password-stdin (min 12 chars)"
-                            .into(),
-                    );
-                };
-                AdminAuthFile::bootstrap(&auth_path, &password)?;
-                println!("admin credentials created at {}", auth_path.display());
-                println!("config path: {}", cfg_path.display());
-                if portable {
-                    println!("enable: exogpuagent config set --portable gui.enabled=true");
-                } else {
-                    println!("enable: exogpuagent config set --machine gui.enabled=true");
-                    println!("then restart the service and open http://127.0.0.1:12010/");
-                }
+                let cfg_path = gui_cli::resolve_gui_config_path(config, machine, portable)?;
+                let plan = BootstrapPlan::from_paths(cfg_path, portable);
+                gui_cli::run_init(&plan, password, password_stdin)?;
+                Ok(ExitCode::SUCCESS)
+            }
+            GuiAction::Setup {
+                config,
+                machine,
+                portable,
+                yes,
+                no_restart,
+            } => {
+                let cfg_path = gui_cli::resolve_gui_config_path(config, machine, portable)?;
+                let plan = BootstrapPlan::from_paths(cfg_path, portable);
+                gui_cli::run_setup(&plan, yes, no_restart, gui_cli::prompt_yes_no_stdout)?;
                 Ok(ExitCode::SUCCESS)
             }
             GuiAction::Url {
@@ -328,7 +334,7 @@ fn run_cli() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 portable,
                 open,
             } => {
-                let cfg_path = resolve_gui_config_path(config, machine, portable)?;
+                let cfg_path = gui_cli::resolve_gui_config_path(config, machine, portable)?;
                 let cfg = if cfg_path.exists() {
                     Config::load(&cfg_path)?
                 } else {
@@ -337,7 +343,7 @@ fn run_cli() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 let url = format!("http://{}:{}/", cfg.gui.bind, cfg.gui.port);
                 println!("{url}");
                 if !cfg.gui.enabled {
-                    eprintln!("note: gui.enabled=false — enable and restart the service to listen");
+                    eprintln!("note: gui.enabled=false — run: exogpuagent gui setup");
                 }
                 if open {
                     #[cfg(target_os = "windows")]
@@ -376,22 +382,4 @@ fn resolve_config_write_path(
         return Ok(Config::portable_path()?);
     }
     Ok(Config::resolve_admin_path(None, false)?)
-}
-
-/// GUI CLI defaults to the **machine** config path (service ProgramData /etc),
-/// unless `--portable` or an explicit `--config` is provided.
-fn resolve_gui_config_path(
-    explicit: Option<PathBuf>,
-    machine_flag: bool,
-    portable_flag: bool,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    if let Some(path) = explicit {
-        return Ok(path);
-    }
-    if portable_flag {
-        return Ok(Config::portable_path()?);
-    }
-    // machine_flag or default → machine
-    let _ = machine_flag;
-    Ok(Config::machine_path())
 }

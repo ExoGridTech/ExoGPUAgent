@@ -102,7 +102,7 @@ async fn login(
         Err(crate::admin_auth::AdminAuthError::NotBootstrapped) => {
             return json_err(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "admin credentials not bootstrapped; run: exogpuagent gui init",
+                "admin credentials not bootstrapped; run: exogpuagent gui setup",
             );
         }
         Err(_) => {

@@ -48,10 +48,10 @@ exogpuagent doctor [--portable]
 exogpuagent version
 exogpuagent config path|show|set [--machine|--portable] [key=value ...]
 exogpuagent service install|uninstall|start|stop|restart
-exogpuagent gui init|url [--machine]
+exogpuagent gui init|setup|url [--machine|--portable]
 ```
 
-Mini GUI (optional): [docs/phase-2c-c2-gui.md](docs/phase-2c-c2-gui.md).
+Mini GUI (optional, localhost `12010`): run `exogpuagent gui setup` after install, or see [docs/phase-2c-c2-gui.md](docs/phase-2c-c2-gui.md).
 
 ## API (JSON contract)
 
